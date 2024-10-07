@@ -1,8 +1,13 @@
 # WIT-metrics
-Calculate inundation summary metrics from Wetland Insights Tool (WIT) data
 
+Jupyter notebook
 
-* **Lineage**:  This notebook was derived from code by Geosciences Australia and modified for:
+Calculate inundation summary metrics from Geoscience Austarlia Wetland Insights Tool (WIT) data (csv files)
+
+## Lineage
+
+This notebook was derived from some initial code Geosciences Australia contributed to an MDBA project BWS Vulnerabilities"
+
 * batch input of multiple WIT CVS in a folder (currently the ANAEv3 WIT output includes 270,653 polygons, each with its own csv file)
 * multiple processor pool support to speed execution when running on a PC workstation
 * linear interpolation of the observations dates to daily data to improve estimates of inundation duration
@@ -11,8 +16,8 @@ Calculate inundation summary metrics from Wetland Insights Tool (WIT) data
 
 * Original Source: https://github.com/GeoscienceAustralia/dea-notebooks/blob/develop/Scientific_workflows/Wetlands_Insight_Tool/metrics/wit_metrics.ipynb
 
-* **Dependencies**: This code requires two things to run (see the analysis parameters section for more information):
-     * A folder containing pre-calculated WIT csv (obtained for the BWS Priorities Project from Geosciences Australia for each ANAE polygon > 1Ha)
+## Dependencies
+     * A folder containing WIT csv (obtained for the BWS Priorities Project from Geosciences Australia for each ANAE polygon > 1Ha)
      * A shapefile (or equivalent) that contains the area that the WIT result was run over.
   
      
@@ -50,7 +55,7 @@ The following files are created:
 * WIT metrics: refer [WIT metrics](https://docs.google.com/document/d/1JBZzVRW6K0fJT4jws3lRranPLPBYBkTDvpu94knv5dY/edit?usp=sharing)
 
 ## Processing Environment
-For the project the analysis was conducted in the python processing environment of ArcGIS Pro 3.0 but were coded to use common open source python data processing libraries (Geopandas, Pandas, numpy) that should enable the analysis to be repeated in most environments.
+For the MDBA BWS Vulnerabilities project the notebook was run in the python processing environment of ArcGIS Pro 3.0.  It was designed to use common open source python data processing libraries (Geopandas, Pandas, numpy) that should enable the analysis to be repeated in most environments.
 
 ***
      
