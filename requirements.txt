@@ -1,0 +1,6 @@
+ipykernel
+ipywidgets
+fiona
+shapely
+tqdm
+pandas

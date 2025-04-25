@@ -1,0 +1,699 @@
+
+"""
+    wit_metrics_worker.py
+
+    This file will be overwritten.  Edit within the wit-metrics jupyter notebook
+
+    This is a python module that is exported to the current working directory from the Jupyter notebook to speed up the code by spreading the work over available CPU cores.
+
+    wit_metrics_worker.py is imported into the jupyter notebook for multithreaded execution using all available computer cores to speed up WIT metrics generation
+
+    This conveniently allows the python code of the worker.py module to be edited in the jupyter environment and stored with the multiprocessing code
+
+"""
+
+import os
+import sys
+
+import numpy as np
+import pandas as pd
+import fiona
+from shapely import geometry
+
+
+# import os  # is loaded above to set the working directory
+import glob
+from tqdm import tqdm
+import time
+import multiprocessing
+from itertools import repeat
+import config
+
+# sys.path.append(
+#     os.getcwd()
+# )  # appends cwd to path allowing python to find the workers.py in the notebook directory
+
+
+
+def shape_list(key, values, shapefile):
+    """
+    Get a generator of shapes from the given shapefile
+        key: the key to match in 'properties' in the shape file
+        values: a list of property values
+        shapefile: the name of your shape file
+        e.g. key='ORIGID', values=[1, 2, 3, 4, 5],
+        shapefile='/g/data/r78/DEA_Wetlands/shapefiles/MDB_ANAE_Aug2017_modified_2019_SB_3577.shp'
+    """
+    count = len(values)
+    with fiona.open(shapefile) as allshapes:
+        for shape in allshapes:
+            shape_id = shape["properties"].get(key)
+            if shape_id is None:
+                continue
+            if shape_id in values:
+                yield (shape_id, shape)
+                count -= 1
+            if count <= 0:
+                break
+
+
+def get_areas(features, pkey="feature_id"):
+    """
+    Calculate the area of a list/generator of shapes
+    input:
+        features: a list of shapes indexed by the key
+    output:
+        a dataframe of area index by the key
+    """
+    dfs = []
+    for f in features:
+        va = pd.DataFrame(
+            [[f[0], geometry.shape(f[1]["geometry"]).area / 1e4]],
+            columns=[pkey, "area"],
+        )
+        dfs.append(va)
+    return pd.concat(dfs, sort=False, axis=0).set_index(pkey)
+
+
+def annual_metrics(
+    wit_data,
+    members=[
+        "pv",
+        "wet",
+        "water",
+        "bs",
+        "npv",
+        ["npv", "pv", "wet"],
+        ["pv", "wet"],
+        ["water", "wet"],
+    ],
+    pkey="feature_id",
+):
+    """
+    Compute the annual max, min, mean, count with given wit data, members and threshold
+    input:
+        wit_data: dataframe of WIT
+        members: the elements which the metrics are computed against, can be a column from wit_data, e.g. 'pv'
+                     or the sum of wit columns, e.g. ['water', 'wet']
+        threshold: a list of thresholds such that (elements >= threshold[i]) is True,
+                    where i = 0, 1...len(threshold)-1
+    output:
+        dataframe of metrics
+    """
+    wit_df = wit_data.copy(deep=True)
+    wit_df = wit_df.set_index(["date"])
+
+    for m in members:
+        if isinstance(m, list):
+            wit_df.insert(wit_df.columns.size, "+".join(m), wit_df[m].sum(axis=1))
+
+    wit_max = wit_df.groupby(pkey).resample("YS").max(numeric_only=True)
+    wit_max = wit_max.rename(columns={n: n + "_max" for n in wit_max.columns})
+
+    wit_min = wit_df.groupby(pkey).resample("YS").min(numeric_only=True)
+    wit_min = wit_min.rename(columns={n: n + "_min" for n in wit_min.columns})
+
+    wit_mean = wit_df.groupby(pkey).resample("YS").mean(numeric_only=True)
+    wit_mean = wit_mean.rename(columns={n: n + "_mean" for n in wit_mean.columns})
+
+    wit_median = wit_df.groupby(pkey).resample("YS").median(numeric_only=True)
+    wit_median = wit_median.rename(
+        columns={n: n + "_median" for n in wit_median.columns}
+    )
+
+    wit_count = (
+        wit_df[[pkey, "bs"]]
+        .groupby(pkey)
+        .resample("YS")
+        .count()
+        .rename(columns={"bs": "count"})
+        .drop(columns=pkey)
+    )
+
+    # each df has the same index so can concat by columns (axis=1) instead of multiple merges
+
+    wit_yearly_metrics = pd.concat(
+        [wit_max, wit_min, wit_mean, wit_median, wit_count], axis=1
+    ).reset_index()
+    wit_yearly_metrics.insert(1, "year", wit_yearly_metrics["date"].dt.year)
+    ofn = "WIT_yearly_metrics" + str(wit_data["chunk"].iat[0]) + ".csv"
+    wit_yearly_metrics.to_csv(ofn)
+    return wit_yearly_metrics
+
+
+def monthly_metrics(
+    wit_data,
+    members=[
+        "pv",
+        "wet",
+        "water",
+        "bs",
+        "npv",
+        ["npv", "pv", "wet"],
+        ["pv", "wet"],
+        ["water", "wet"],
+    ],
+    pkey="feature_id",
+):
+    """
+    Compute the monthly max, min, mean, count with given wit data and combined members
+    input:
+        wit_data: dataframe of WIT
+        members: the elements which the metrics are computed against, can be a column from wit_data, e.g. 'pv'
+                     or the sum of wit columns, e.g. ['water', 'wet']
+        threshold: a list of thresholds such that (elements >= threshold[i]) is True,
+                    where i = 0, 1...len(threshold)-1
+    output:
+        dataframe of metrics
+    """
+    wit_df = wit_data.copy(deep=True)
+    wit_df = wit_df.set_index(["date"])
+
+    for m in members:
+        if isinstance(m, list):
+            wit_df.insert(wit_df.columns.size, "+".join(m), wit_df[m].sum(axis=1))
+
+    wit_max = wit_df.groupby(pkey).resample("MS").max(numeric_only=True)
+    wit_max = wit_max.rename(columns={n: n + "_max" for n in wit_max.columns})
+
+    wit_min = wit_df.groupby(pkey).resample("MS").min(numeric_only=True)
+    wit_min = wit_min.rename(columns={n: n + "_min" for n in wit_min.columns})
+
+    wit_mean = wit_df.groupby(pkey).resample("MS").mean(numeric_only=True)
+    wit_mean = wit_mean.rename(columns={n: n + "_mean" for n in wit_mean.columns})
+
+    wit_median = wit_df.groupby(pkey).resample("MS").median(numeric_only=True)
+    wit_median = wit_median.rename(
+        columns={n: n + "_median" for n in wit_median.columns}
+    )
+
+    wit_count = (
+        wit_df[[pkey, "bs"]]
+        .groupby(pkey)
+        .resample("MS")
+        .count()
+        .rename(columns={"bs": "count"})
+        .drop(columns=pkey)
+    )
+
+    # each df has the same index so can concat by columns (axis=1) instead of multiple merges
+
+    wit_monthly_metrics = pd.concat(
+        [wit_max, wit_min, wit_mean, wit_median, wit_count], axis=1
+    ).reset_index()
+    wit_monthly_metrics.insert(1, "month", wit_monthly_metrics["date"].dt.month)
+    wit_monthly_metrics.insert(1, "year", wit_monthly_metrics["date"].dt.year)
+    ofn = "WIT_monthly_metrics" + str(wit_data["chunk"].iat[0]) + ".csv"
+    wit_monthly_metrics.to_csv(ofn)
+    return wit_monthly_metrics
+
+
+def get_event_time(wit_ww, threshold, pkey="feature_id"):
+    """
+
+    Compute inundation event time by given threshold
+    input:
+        wit_df: wetness computed from wit data
+        threshold: a value such that (water+wet > threshold) = inundation
+    output:
+        dateframe of inundation event time
+    """
+    # wit_ww['date'] = df['date'].dt.tz_localize(None)
+
+    if isinstance(threshold, pd.DataFrame):
+        gid = wit_ww.index.unique()[0]
+        poly_threshold = threshold.loc[gid].to_numpy()[0]
+    else:
+        poly_threshold = threshold
+    i_start = wit_ww[wit_ww["water+wet"] >= poly_threshold]["date"].min()
+    if pd.isnull(i_start):
+        re = pd.DataFrame(
+            [[np.nan] * 5],
+            columns=["threshold", "start_date", "end_date", "duration", "gap"],
+            index=wit_ww.index.unique(),
+        )
+        re.index.name = pkey
+        return re
+    # SSB - moved equal to needed for when threshold = 0
+    # re_idx = np.searchsorted(wit_ww[(wit_ww['water+wet'] < poly_threshold)]['date'].values,
+    #                         wit_ww[(wit_ww['water+wet'] >= poly_threshold)]['date'].values)
+    re_idx = np.searchsorted(
+        wit_ww[(wit_ww["water+wet"] <= poly_threshold)]["date"].values,
+        wit_ww[(wit_ww["water+wet"] > poly_threshold)]["date"].values,
+    )
+
+    re_idx, count = np.unique(re_idx, return_counts=True)
+    start_idx = np.zeros(len(count) + 1, dtype="int")
+    start_idx[1:] = np.cumsum(count)
+
+    # SSB removed "equals" sorts correctly when threshold is zero
+    # re_start = wit_ww[(wit_ww['water+wet'] >= poly_threshold)].iloc[start_idx[:-1]][['date']].rename(columns={'date': 'start_date'})
+    # re_end = wit_ww[(wit_ww['water+wet'] >= poly_threshold)].iloc[start_idx[1:] - 1][['date']].rename(columns={'date': 'end_date'})
+    re_start = (
+        wit_ww[(wit_ww["water+wet"] > poly_threshold)]
+        .iloc[start_idx[:-1]][["date"]]
+        .rename(columns={"date": "start_date"})
+    )
+    re_end = (
+        wit_ww[(wit_ww["water+wet"] > poly_threshold)]
+        .iloc[start_idx[1:] - 1][["date"]]
+        .rename(columns={"date": "end_date"})
+    )
+
+    re = pd.concat([re_start, re_end], axis=1)
+    if not re.empty:
+        re.insert(
+            2,
+            "duration",
+            # (re['end_date'] - re['start_date'] + np.timedelta64(1, 'D')).astype('timedelta64[D]').astype('timedelta64[D]'))
+            (re["end_date"] - re["start_date"] + pd.Timedelta(days=1)).dt.days,
+        )  # divide the timedelta column by pd.Timedelta(1, 'D') effectively converts the timedeltas from nanoseconds to days as a floating-point number.
+
+        re.insert(
+            3,
+            "gap",
+            np.concatenate(
+                [
+                    [np.timedelta64(0, "D")],
+                    # (re['start_date'][1:].values - re['end_date'][:-1].values - np.timedelta64(1, 'D')).astype('timedelta64[D]')]))
+                    (
+                        re["start_date"][1:].values
+                        - re["end_date"][:-1].values
+                        - np.timedelta64(1, "D")
+                    ),
+                ]
+            ),
+        )  # divide the timedelta column by pd.Timedelta(1, 'D') effectively converts the timedeltas from nanoseconds to days as a floating-point number.
+
+        re["gap"] = re["gap"].dt.days
+        re.insert(0, "threshold", poly_threshold)
+        re.insert(0, pkey, wit_ww.index.unique()[0])
+        re = re.set_index(pkey)
+    return re
+
+
+def get_im_stats(grouped_wit, im_time, wit_area):
+    """
+    Get inundation stats given wit data and events
+    input:
+        grouped_wit: wit data
+        im_time: inundation events in time
+    output:
+        the stats of inundation events
+    """
+    gid = grouped_wit.index.unique()[0]
+    if gid not in im_time.indices.keys():
+        return pd.DataFrame(
+            [[np.nan] * 5],
+            columns=[
+                "start_date",
+                "max_water+wet",
+                "mean_water+wet",
+                "max_wet_area",
+                "mean_wet_area",
+            ],
+            index=[gid],
+        )
+    re_left = np.searchsorted(
+        grouped_wit["date"].values.astype("datetime64"),
+        im_time.get_group(gid)["start_date"].values,
+        side="left",
+    )
+    re_right = np.searchsorted(
+        grouped_wit["date"].values.astype("datetime64"),
+        im_time.get_group(gid)["end_date"].values,
+        side="right",
+    )
+    re = pd.DataFrame()
+    dfs = []
+    for a, b in zip(re_left, re_right):
+        tmp = pd.concat(
+            [
+                grouped_wit.iloc[a : a + 1]["date"].rename("start_date"),
+                pd.Series(
+                    grouped_wit.iloc[a:b]["water+wet"].max(),
+                    index=[gid],
+                    name="max_water+wet",
+                ),
+                pd.Series(
+                    grouped_wit.iloc[a:b]["water+wet"].mean(),
+                    index=[gid],
+                    name="mean_water+wet",
+                ),
+            ],
+            axis=1,
+        )
+        if isinstance(wit_area, pd.DataFrame):
+            tmp.insert(
+                3,
+                "max_wet_area",
+                tmp["max_water+wet"].values * wit_area[wit_area.index == gid].values,
+            )
+            tmp.insert(
+                4,
+                "mean_wet_area",
+                tmp["mean_water+wet"].values * wit_area[wit_area.index == gid].values,
+            )
+
+        dfs.append(tmp)
+    re = pd.concat(dfs, sort=False, axis=0)
+    # reset the index as the pkey
+    re.index.name = grouped_wit.index.name
+    re.reset_index()
+
+    # re.to_csv('ssb.csv')
+    return re.round(
+        {"max_water+wet": 4, "mean_water+wet": 4, "max_wet_area": 4, "mean_wet_area": 4}
+    )
+
+
+def event_time(wit_df, threshold=0.01, pkey="feature_id"):
+    """
+    Compute the inundation events with given wit data and threshold
+    input:
+        wit_df: wetness computed from wit data
+        threshold: a value such that (water+wet > threshold) = inundation,
+    output:
+        dataframe of events
+    """
+    return (
+        wit_df.groupby(pkey)
+        .apply(get_event_time, threshold=threshold, pkey=pkey)
+        .dropna()
+        .droplevel(0)
+    )
+
+
+def event_stats(wit_df, wit_im, wit_area, pkey="feature_id"):
+    """
+    Compute inundation event stats with given wit wetness, events defined by (start_date, end_date)
+    and polygon areas
+    input:
+        wit_df: wetness computed from wit data
+        wit_im: inundation event
+        wit_area: polygon areas indexed by the key
+    output:
+        dataframe of event stats
+    """
+    grouped_im = wit_im[["start_date", "end_date"]].groupby(pkey)
+    # was droplevel(0) but this left first column without a header (1) deletes that column instead
+    return (
+        wit_df.groupby(pkey)
+        .apply(get_im_stats, im_time=grouped_im, wit_area=wit_area)
+        .droplevel(1)
+    )
+
+
+def inundation_metrics(
+    wit_data, threshold=0.01, shapefile="shapefile", skey="UID", debug_event_times=False, pkey="feature_id"
+):
+    """
+    Compute inundation metrics with given wit data, polygon areas and threshold
+    input:
+        wit_data: a dataframe of wit_data
+        wit_area: polygon areas indexed by the key
+        threshold: a value such that (water+wet > threshold) = inundation
+    output:
+        dataframe of inundation metrics
+    """
+    wit_area = []
+    if os.path.isfile(shapefile):
+        features = shape_list(skey, wit_data["feature_id"].unique(), shapefile)
+        wit_area = get_areas(features, pkey)
+
+    wit_df = wit_data.copy(deep=True)
+    wit_df.insert(2, "water+wet", wit_df[["water", "wet"]].sum(axis=1).round(4))
+    # wit_df = wit_df.drop(columns=wit_df.columns[3:])
+    wit_df = wit_df[[pkey, "date", "water+wet"]]
+    # wit_df['date'] = wit_df['date'].astype('datetime64')
+    #wit_df["date"] = pd.to_datetime(wit_df["date"])
+
+    if debug_event_times:
+        ofn = "ANAE_wit_df" + str(wit_data["chunk"].iat[0]) + ".csv"
+        wit_df.to_csv(ofn)
+    wit_df = wit_df.set_index(pkey)
+    wit_im_time = event_time(wit_df, threshold, pkey)
+    if debug_event_times:
+        ofn = "WIT_event_times" + str(wit_data["chunk"].iat[0]) + ".csv"
+        wit_im_time.to_csv(ofn)
+    wit_im_stats = event_stats(wit_df, wit_im_time, wit_area, pkey)
+    if debug_event_times and not wit_im_time.empty:
+        ofn = "WIT_event_stats" + str(wit_data["chunk"].iat[0]) + ".csv"
+        wit_im_stats.to_csv(ofn)
+
+    wit_im = pd.DataFrame()
+    if not wit_im_time.empty:
+        wit_im = pd.merge(
+            wit_im_time, wit_im_stats, on=[pkey, "start_date"], how="inner"
+        )
+        wit_im["start_date"] = pd.to_datetime(wit_im["start_date"]).dt.date
+        wit_im["end_date"] = pd.to_datetime(wit_im["end_date"]).dt.date
+        ofn = "WIT_inundation_metrics"+str(wit_data['chunk'].iat[0])+".csv"
+        wit_im.to_csv(ofn)
+    return wit_im
+
+
+def interpolate_daily(wit_data, pkey="feature_id"):
+    return wit_data.groupby(pkey).apply(interpolate_wit, pkey=pkey).droplevel(0)
+
+
+def interpolate_wit(grouped_wit, pkey="feature_id"):
+    grouped_wit = grouped_wit.set_index("date")
+
+    # resmaple numeric fields to daily taking mean if more than one result in a day (should not occur in WIT outputs)
+    # the mean will return NaN for missing days, which are filled by interpolate
+    wit_metric_fields = (
+        grouped_wit.select_dtypes("number").resample("D").mean().interpolate(axis=0)
+    )
+
+    # resample and forward fill objects (includes the pkey string)
+    string_fields = grouped_wit.select_dtypes("object").resample("D").first().ffill()
+    # join the numeric fields back to the objects
+    daily_wit = string_fields.join(wit_metric_fields).reset_index()
+
+    # Alternative - define empty daily array and intersect with the data to populate known dates
+    # daily_wit = pd.DataFrame({pkey: grouped_wit[pkey].unique()[0], 'date': pd.date_range(grouped_wit['date'].min(), grouped_wit['date'].max(), freq='D'),
+    #                       'bs': np.nan, 'npv': np.nan, 'pv': np.nan, 'wet': np.nan, 'water': np.nan})
+    # print(daily_wit)
+    # _, nidx, oidx = np.intersect1d(daily_wit['date'].to_numpy().astype('datetime64[D]'), grouped_wit['date'].to_numpy().astype('datetime64[D]'),
+    #               return_indices=True)
+    # daily_wit.loc[nidx, ["bs","npv","pv","wet","water"]]  = grouped_wit[["bs","npv","pv","wet","water"]].iloc[oidx].to_numpy()
+    # daily_wit = daily_wit.interpolate(axis=0)
+    # #recent version of pandas throws error due to date column.  workaround is to only interpolate the columns of data
+    # #daily_wit[["bs","npv","pv","wet","water"]] = daily_wit.groupby(['feature_id']).apply(lambda x: x[["bs","npv","pv","wet","water"]].interpolate(axis=0))
+    # if 'chunk' in grouped_wit.columns:
+    #     daily_wit['chunk'] = grouped_wit['chunk'].unique()[0]
+    return daily_wit
+
+
+def time_since_last_inundation(wit_data, wit_im, pkey="feature_id"):
+    """
+    create a pivot table to gather the time since last inundation using the event metrics
+    timesincelast = number of days from last event end-date to final date in WIT record
+    """
+    maxdate = pd.pivot_table(
+        wit_data, index=pkey, values=["date"], aggfunc='max'
+    ).rename(columns={"date": "final-date"})
+    wit_im["end_date"] = pd.to_datetime(wit_im["end_date"])
+    lastevent = pd.pivot_table(wit_im, index=pkey, values=["end_date"], aggfunc='max')
+    time_since_last = pd.merge(lastevent, maxdate, on=[pkey], how="inner")
+    time_since_last.insert(
+        2,
+        "timesincelast",
+        (time_since_last["final-date"] - time_since_last["end_date"]).dt.days,
+    )
+    ofn = "WIT_time_since_last_inundation"+str(wit_data['chunk'].iat[0])+".csv"
+    time_since_last.to_csv(ofn)
+    return time_since_last
+
+
+def all_time_median(wit_data, members=[["water", "wet"]], pkey="feature_id"):
+    """
+    Compute the all time median
+    input:
+        wit_data: dataframe of WIT
+        members: the elements which the metrics are computed against, can be a column from wit_data, e.g. 'pv'
+                     or the sum of wit columns, e.g. ['water', 'wet']
+    output:
+        dataframe of median indexed by pkey
+    """
+    wit_df = wit_data.copy(deep=True)
+    for m in members:
+        if isinstance(m, list):
+            wit_df.insert(wit_df.columns.size, "+".join(m), wit_df[m].sum(axis=1))
+    wit_median = wit_df.groupby(pkey).median().round(decimals=4)
+    ofn = "WIT_event_threshold" + str(wit_data["chunk"].iat[0]) + ".csv"
+    wit_median.to_csv(ofn)
+    return wit_median
+
+
+def merge_batches(path, output_filenames):
+    """
+    merges the outputs from each batch into a single file of results for all ANAE polygons
+    """
+    for fname in output_filenames:
+        ofns = glob.glob(os.path.join(path, fname + "*.csv"))
+        dfs = []
+        for ofn in ofns:
+            try:
+                df = pd.read_csv(ofn)
+                dfs.append(df)
+            except:
+                print("Error reading file: ", ofn)
+        if dfs:
+            out_data = pd.concat(dfs)
+            out_data.reset_index(drop=True, inplace=True)
+            ofn = "RESULT_" + fname + ".csv"
+            try:
+                out_data.round(4).to_csv(os.path.join(path, ofn), index=False)
+            except:
+                print("Error writing merged file: ", os.path.join(path, ofn))
+
+
+def delete_old_batch_outputs(path, output_filenames):
+    """
+    deletes the individual batch results which are no longer required after they have been merged
+    """
+    for fname in output_filenames:
+        ofns = glob.glob(os.path.join(path, "./" + fname + "*.csv"))
+        for ofn in ofns:
+            try:
+                os.remove(ofn)
+            except:
+                print("Error while deleting file : ", ofn)
+
+
+def nicetime(s):
+    return time.strftime("%H hours %M minutes %S seconds", time.gmtime(s))
+
+
+if __name__ == "__main__":
+    shape_area = False
+    debug = False
+    pkey = "feature_id"
+
+
+
+    os.makedirs(config.working_directory, exist_ok=True)
+    os.chdir(config.working_directory)
+    cwd_path = os.getcwd()
+    print(cwd_path)
+
+
+    output_filenames = [
+        "WIT_yearly_metrics",
+        "WIT_event_threshold",
+        "WIT_inundation_metrics",
+        "WIT_time_since_last_inundation",
+        "WIT_event_times",
+        "WIT_event_stats",
+    ]
+    if config.interpolate_to_daily:
+        output_filenames.append("WIT_monthly_metrics")
+        # a folder is created to house interpolated daily files should that be required
+        # there is debug code commented out to enable the saving in the code below
+        if config.save_interpolated_csv:
+            interpolated_data_path = os.path.join(os.path.dirname(config.csv_files), "interpolated")
+            try:
+                if not os.path.isdir(interpolated_data_path):
+                    os.mkdir(interpolated_data_path)
+            except Exception as ex:
+                print(ex)
+
+    start = time.process_time()
+
+    delete_old_batch_outputs(cwd_path, output_filenames)
+    # use glob to get all the csv files
+    csv_list = glob.glob(os.path.join(config.csv_files, "*.csv"))
+    #not required
+    # if sys.platform == 'win32':
+    #     multiprocessing.set_executable(os.path.join(os.path.dirname(sys.executable), 'pythonw.exe'))
+
+    # cpu core count -1 to leave the os a crumb to work with
+    CPU = multiprocessing.cpu_count() - 1
+    chunk_size = config.batch_size * CPU
+    # l_index, r_index = 0, batchsize
+    # batch = csv_files[l_index:r_index]
+    print ("Found",len(csv_list),"WIT csv in",config.csv_files)
+    print ("Processing using",CPU,"cores, and batches of",config.batch_size,"files.")
+    pool = multiprocessing.Pool(processes = CPU)
+    try:
+        for j in tqdm(range(0, len(csv_list), chunk_size)):
+            mpbatch = csv_list[j:j + chunk_size]
+            wd = []
+            #len(wd)
+            for i in range(0, len(mpbatch), config.batch_size):
+                batch = mpbatch[i:i + config.batch_size]
+                #print(i, batch)
+                startbatch = time.process_time()
+                dfs = []
+                UIDs = []
+                for f in batch:
+                    df = pd.read_csv(f)
+                    df = df[df['pc_missing'] < config.pc_missing_threshold]
+                    df['date'] = pd.to_datetime(df['date']).dt.tz_localize(None)
+                    df = df.sort_values(by=['date'])
+                    dfs.append(df)
+                wit_data = pd.concat(dfs)
+                wit_data['chunk'] = j+i
+                wd.append(wit_data)
+                #print ("Batch",j+i,"completed in", time.process_time() - startbatch, "seconds.")
+
+            #print (j,"**** send to pool *********")
+
+            #-----------------------------------------------------------------
+            # INTERPOLATE
+            #-----------------------------------------------------------------
+            if config.interpolate_to_daily:
+                wd = pool.map(interpolate_daily, wd)
+                if config.save_interpolated_csv:
+                    ofn = os.path.join(interpolated_data_path,"ANAE_interpolated"+str(j)+".csv")
+                    print ("saving interpolated data: "+ ofn)
+                    wd[0].to_csv(ofn)
+
+                #-----------------------------------------------------------------
+                # Monthly stats require interpolated (to daily) data to infill missing records
+                #-----------------------------------------------------------------
+                monthly_stats = pool.map(monthly_metrics,wd)
+
+            #-----------------------------------------------------------------
+            # Annual metrics  min, max, median for all WIT params per year.  Also 'water+wet'
+            #-----------------------------------------------------------------
+            annual_stats = pool.map(annual_metrics,wd)
+
+            #-----------------------------------------------------------------
+            # all_time_median inundation of 'water+wet' is used as the threshold for inundation events
+            #-----------------------------------------------------------------
+            median_inundation = pool.map(all_time_median, wd)
+            threshold_list=[]
+            for e in median_inundation:
+                threshold_list.append(pd.DataFrame(e['water+wet']))
+
+            #-----------------------------------------------------------------
+            # Inundation metrics - applying threshold to 'water+wet'
+            #-----------------------------------------------------------------   
+            wit_im = pool.starmap(inundation_metrics, zip(wd, threshold_list, repeat(config.shapefile), repeat(config.shape_uid), repeat(config.debug_event_times)))
+
+            #-----------------------------------------------------------------
+            # Time since last inundation
+            #-----------------------------------------------------------------
+            time_since_last = pool.starmap(time_since_last_inundation, zip(wd, wit_im))
+
+
+    except Exception as ex:
+        print(ex)
+    finally:
+        pool.close()
+        pool.join()   
+
+    print(
+        len(csv_list), "csv processed.",
+        "All batches completed in",
+        nicetime(time.process_time() - start),
+    )
+
+    merge_batches(cwd_path, output_filenames)
+    print("All batches merged in", nicetime(time.process_time() - start))
+    # cleanup
+    delete_old_batch_outputs(cwd_path, output_filenames)
+
