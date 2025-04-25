@@ -1,23 +1,18 @@
-
-
 #  set the working directory - needs to have enough free space for the generated outputs
 working_directory = "d:/wit-metrics/output"
-working_directory = r"T:\ANAE_WIT_Apr_2025_RESULTS"
 
 
 # shapefile: the shape file mentioned above to find the  and get their area
 # set to '' to disable area lookup
 shapefile = "d:/wit-metrics/input/shp/ANAEv3_WIT.shp"
-shapefile = r"D:\BWSVulnerability\WIT\ANAEv3_WIT_clean19042022\ANAEv3_WIT.shp"
 # shapefile field name that identifies each polygon -  the ANAEv3 UID geohash was used here.
 # The ANAE UID is also used in the naming convention for the CSV files
 shape_uid = "UID"
 
 # Path to folder that contains the WIT csv files to process.  When debugging providing a single file might be prudent.
 csv_files = "d:/wit-metrics/input/csv"
-csv_files = r"T:\test_data"
 
-#Only use WIT data where the pc_missing is less than the threshold (default is 0.1) i.e. 90% of polygon was visible to satellites
+# Only use WIT data where the pc_missing is less than the threshold (default is 0.1) i.e. 90% of polygon was visible to satellites
 pc_missing_threshold = 0.1
 
 # csv feature_id - the WIT csv output files include a column 'feature_id' that in this case is the ANAE UID

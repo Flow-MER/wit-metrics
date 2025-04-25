@@ -2,3 +2,5 @@ wit-metrics.code-workspace
 
 __pycache__/
 .venv/
+
+debug_config.py
