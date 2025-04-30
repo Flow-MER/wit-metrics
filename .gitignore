@@ -4,5 +4,4 @@ __pycache__/
 .venv/
 csv_daily_interpolated/
 
-RESULT_WIT_*
-WIT_*
+
