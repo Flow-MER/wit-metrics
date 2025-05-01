@@ -525,14 +525,14 @@ def time_since_last_inundation(wit_data, wit_im, pkey="feature_id"):
     chunk = int(wit_data["chunk"].iat[0])
     max_date = pd.pivot_table(
         wit_data.set_index(pkey), index=pkey, values=["date"], aggfunc="max"
-    ).rename(columns={"date": "final-date"})
+    ).rename(columns={"date": "final_date"})
     wit_im["end_date"] = pd.to_datetime(wit_im["end_date"])
     last_event = pd.pivot_table(wit_im, index=pkey, values=["end_date"], aggfunc="max")
     time_since_last = pd.merge(last_event, max_date, on=[pkey], how="inner")
     time_since_last.insert(
         2,
         "timesincelast",
-        (time_since_last["final-date"] - time_since_last["end_date"]).dt.days,
+        (time_since_last["final_date"] - time_since_last["end_date"]).dt.days,
     )
     out_file = os.path.join(
         config.working_directory,
