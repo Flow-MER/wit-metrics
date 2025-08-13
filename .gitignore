@@ -3,5 +3,8 @@ wit-metrics.code-workspace
 __pycache__/
 .venv/
 csv_daily_interpolated/
+ANAEv3_WIT.*
+WIT_*
+
 
 

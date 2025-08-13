@@ -71,7 +71,11 @@ def get_areas(features, pkey="feature_id"):
             columns=[pkey, "area"],
         )
         dfs.append(va)
-    return pd.concat(dfs, sort=False, axis=0).set_index(pkey)
+    if dfs:
+        return pd.concat(dfs, sort=False, axis=0).set_index(pkey)
+    else:
+        print("WARNING: Feature ids are not in shapefile.  Could not get area.")
+        return None
 
 
 def annual_metrics(
@@ -436,7 +440,7 @@ def inundation_metrics(
     wit_area = []
     if os.path.isfile(shapefile):
         features = shape_list(skey, wit_data[pkey].unique(), shapefile)
-        wit_area = get_areas(features, pkey)
+        wit_area = get_areas(features, pkey) if features else None
 
     wit_df = wit_data.copy(deep=True)
     wit_df.insert(2, "water+wet", wit_df[["water", "wet"]].sum(axis=1).round(4))

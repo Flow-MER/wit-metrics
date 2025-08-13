@@ -6,15 +6,12 @@
 # Instead, modify the parameters in the notebook and then run the notebook to generate the config.py file.
 #-----------------------------------------------------------------
 
-
 # set the working directory - needs to have enough free space for the generated outputs (50 GB for full ANAE set)
 working_directory = "d:/wit-metrics/output"
-#working_directory = r"T:\ANAE_WIT_Apr_2025_RESULTS"
 
 # shapefile: the shape file mentioned above to find the  and get their area
 # set to '' to disable area lookup
 shapefile = "d:/wit-metrics/input/shp/ANAEv3_test.shp"
-#shapefile = r"D:\BWSVulnerability\WIT\ANAEv3_WIT_clean19042022\ANAEv3_WIT.shp"
 
 # shapefile field name that identifies each polygon -  the ANAEv3 UID geohash was used here.
 # The ANAE UID is also used in the naming convention for the CSV files
@@ -22,7 +19,6 @@ shape_uid = "UID"
 
 # Path to folder that contains the WIT csv files to process.  When debugging providing a single file might be prudent.
 csv_files = "d:/wit-metrics/input/csv"
-#csv_files = r"T:\ANAE_WIT_Apr_2025"
 
 #Only use WIT data where the pc_missing is less than the threshold (default is 0.1) i.e. >90% of the polygon was visible to satellites
 pc_missing_threshold = 0.1
@@ -51,16 +47,6 @@ monthly_subset=[
         "count",
     ]
 
-# monthly_subset=[
-#         "feature_id",
-#         "date",
-#         "water+wet_median",
-#         "npv+pv+wet_median",
-#         "pv_median",
-#         "count",
-#     ]
-
-
 # set to true to save intermediate data frames containing the event times and stats
 # these are saved in the working directory
 debug_event_times = False
@@ -73,3 +59,19 @@ debug_event_times = False
 # during processing the code will generate outputs for each batch then glue them together at the end.
 
 batch_size = 100
+
+# ###########################################################
+# # specific config used for Flow-MER Project annual analysis
+# # this should be commented out or deleted for anyone else
+# csv_files = r"M:\ANAE_WIT_07082025"
+# working_directory = r"M:\ANAE_WIT_07082025_RESULTS"
+# shapefile = r"M:\ANAEv3_WIT_clean16052025\ANAEv3_WIT.shp"
+# monthly_subset=[
+#         "feature_id",
+#         "date",
+#         "water+wet_median",
+#         "npv+pv+wet_median",
+#         "pv_median",
+#         "count",
+#     ]
+# ###########################################################
