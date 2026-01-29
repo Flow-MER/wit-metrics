@@ -4,3 +4,4 @@ fiona
 shapely
 tqdm
 pandas
+pytest-cov
