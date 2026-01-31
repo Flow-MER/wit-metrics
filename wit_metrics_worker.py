@@ -1,4 +1,3 @@
-
 """
 wit_metrics_worker.py
 
@@ -34,6 +33,7 @@ from tqdm import tqdm
 import time
 import multiprocessing
 from itertools import repeat
+
 # ------------------------------------------------------------------------------
 # Path & config setup
 # ------------------------------------------------------------------------------
@@ -47,8 +47,7 @@ else:
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-#from tools.dask import start_dask
-#from tools.logging_setup import setup_logging
+
 from config import wit_metrics_cfg as config
 
 logger = logging.getLogger(__name__)
@@ -56,6 +55,7 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------------------
 # Geometry helpers
 # ------------------------------------------------------------------------------
+
 
 def shape_list(key, values, shapefile):
     """
@@ -77,12 +77,12 @@ def shape_list(key, values, shapefile):
                 yield k, feat
 
 
-def get_areas(features, pkey):
+def get_areas(polygons, pkey):
     """
     Calculates the area of each feature in hectares.
 
     Args:
-        features (iterable): An iterable of (id, feature) tuples.
+        polygons (iterable): An iterable of (id, feature_object) tuples from shape_list.
         pkey (str): The column name to use for the ID in the output DataFrame.
 
     Returns:
@@ -90,10 +90,10 @@ def get_areas(features, pkey):
                       or None if no features are provided.
     """
     rows = []
-    for gid, feat in features:
+    for poly_id, poly in polygons:
         # Calculate area and convert to hectares (1e4 m^2 = 1 ha)
-        area = geometry.shape(feat["geometry"]).area / 1e4
-        rows.append((gid, area))
+        area = geometry.shape(poly["geometry"]).area / 1e4
+        rows.append((poly_id, area))
     if not rows:
         return None
     return pd.DataFrame(rows, columns=[pkey, "area"]).set_index(pkey)
@@ -102,6 +102,7 @@ def get_areas(features, pkey):
 # ------------------------------------------------------------------------------
 # Aggregation helpers
 # ------------------------------------------------------------------------------
+
 
 def _add_combined_members(df, members):
     """
@@ -126,7 +127,7 @@ def _add_combined_members(df, members):
 
 def _resample_metrics(df, freq, pkey):
     """
-    Standard resampling logic. 
+    Standard resampling logic.
     Calculates each stat independently and merges them at the end.
 
     Args:
@@ -167,10 +168,10 @@ def _resample_metrics(df, freq, pkey):
     return res.reset_index()
 
 
-
 # ------------------------------------------------------------------------------
 # Annual / Monthly metrics
 # ------------------------------------------------------------------------------
+
 
 def annual_metrics(wit_data, members=None, pkey="feature_id"):
     """
@@ -186,15 +187,20 @@ def annual_metrics(wit_data, members=None, pkey="feature_id"):
     """
     chunk = int(wit_data["chunk"].iat[0])
     members = members or [
-        "pv", "wet", "water", "bs", "npv",
-        ["npv", "pv", "wet"], ["pv", "wet"], ["water", "wet"]
+        "pv",
+        "wet",
+        "water",
+        "bs",
+        "npv",
+        ["npv", "pv", "wet"],
+        ["pv", "wet"],
+        ["water", "wet"],
     ]
 
     # 1. Create a local copy to avoid side-effects on the main wit_data
     # Use errors='ignore' in case columns were already dropped by monthly_metrics
-    df = (
-        wit_data.drop(columns=["chunk", "pc_missing"], errors='ignore')
-        .set_index("date")
+    df = wit_data.drop(columns=["chunk", "pc_missing"], errors="ignore").set_index(
+        "date"
     )
 
     # 2. Add composite columns (e.g., water+wet)
@@ -208,7 +214,7 @@ def annual_metrics(wit_data, members=None, pkey="feature_id"):
     res.insert(1, "year", res["date"].dt.year)
 
     # 5. Save output
-    out = os.path.join(config.OUTPUT_DIR, f"WIT_yearly_metrics{chunk}.parquet")
+    out = config.OUTPUT_DIR / f"WIT_yearly_metrics{chunk}.parquet"
     write_batch_parquet(res, out)
 
     return res
@@ -228,12 +234,20 @@ def monthly_metrics(wit_data, members=None, pkey="feature_id"):
     """
     chunk = int(wit_data["chunk"].iat[0])
     members = members or [
-        "pv", "wet", "water", "bs", "npv",
-        ["npv", "pv", "wet"], ["pv", "wet"], ["water", "wet"]
+        "pv",
+        "wet",
+        "water",
+        "bs",
+        "npv",
+        ["npv", "pv", "wet"],
+        ["pv", "wet"],
+        ["water", "wet"],
     ]
 
     # Drop non-essential columns and set date as index for resampling
-    df = wit_data.drop(columns=["chunk", "pc_missing"], errors='ignore').set_index("date")
+    df = wit_data.drop(columns=["chunk", "pc_missing"], errors="ignore").set_index(
+        "date"
+    )
     df = _add_combined_members(df, members)
 
     # Use the optimized resampler
@@ -243,7 +257,7 @@ def monthly_metrics(wit_data, members=None, pkey="feature_id"):
     res.insert(1, "month", res["date"].dt.month)
     res.insert(1, "year", res["date"].dt.year)
 
-    out = os.path.join(config.OUTPUT_DIR, f"WIT_monthly_metrics{chunk}.parquet")
+    out = config.OUTPUT_DIR / f"WIT_monthly_metrics{chunk}.parquet"
     write_batch_parquet(res, out)
     return res
 
@@ -252,80 +266,145 @@ def monthly_metrics(wit_data, members=None, pkey="feature_id"):
 # Inundation detection (vectorised, no apply)
 # ------------------------------------------------------------------------------
 
+
 def _event_table(df, threshold):
     """
-    Identifies inundation events where 'water+wet' exceeds a threshold.
+    Generates a table of inundation events and gaps based on a threshold.
+
+    Logic:
+    1. Identifies periods where 'water+wet' > threshold.
+    2. Groups contiguous periods into events.
+    3. Calculates duration (days) and aggregated area-days for events.
+    4. Calculates gaps between events.
+    5. Ensures the total duration + gaps equals the total record span (Golden Rule).
 
     Args:
-        df (pd.DataFrame): Input DataFrame with 'water+wet' and 'date' columns.
-        threshold (float): The threshold value for inundation.
+        df (pd.DataFrame): Input DataFrame with 'date' and 'water+wet' columns.
+        threshold (float): The threshold value to define an event.
 
     Returns:
-        pd.DataFrame: A DataFrame of events with start_date, end_date, duration, and gap.
+        pd.DataFrame: DataFrame with columns [start_date, end_date, duration, gap, area_days].
     """
-    wet = df["water+wet"].to_numpy()
-    dates = df["date"].to_numpy()
-
-    inundated = wet > threshold
-    if not inundated.any():
+    df = df.sort_values("date").reset_index(drop=True)
+    if df.empty:
         return pd.DataFrame(
-            columns=["start_date", "end_date", "duration", "gap"]
+            columns=["start_date", "end_date", "duration", "gap", "area_days"]
         )
 
-    # Find indices where state changes (edges)
-    edges = np.diff(inundated.astype(int))
-    starts = np.where(edges == 1)[0] + 1
-    ends = np.where(edges == -1)[0]
+    record_start = df["date"].min()
+    record_end = df["date"].max()
 
-    # Handle boundary conditions (start or end of time series)
-    if inundated[0]:
-        starts = np.r_[0, starts]
-    if inundated[-1]:
-        ends = np.r_[ends, len(inundated) - 1]
+    df["above"] = df["water+wet"] > threshold
 
-    start_dates = dates[starts]
-    end_dates = dates[ends]
+    # CASE 1: Never Wet
+    if not df["above"].any():
+        total_span = (record_end - record_start).days + 1
+        return pd.DataFrame(
+            [
+                {
+                    "start_date": None,
+                    "end_date": None,
+                    "duration": 0,
+                    "gap": total_span,
+                    "area_days": 0.0,
+                }
+            ]
+        )
 
-    # Calculate duration in days (inclusive)
-    duration = (end_dates - start_dates).astype("timedelta64[D]").astype(int) + 1
+    # Identify contiguous event blocks
+    # Added 'area_days' to the aggregation as the sum of fractions
+    df["group_id"] = (df["above"] != df["above"].shift()).cumsum()
+    event_groups = (
+        df[df["above"]]
+        .groupby("group_id")
+        .agg(
+            start_date=("date", "min"),
+            end_date=("date", "max"),
+            area_days=(
+                "water+wet",
+                "sum",
+            ),  # <--- Sum of fractions (e.g., 0.8 + 0.9 + 0.4 = 2.1)
+        )
+        .sort_values("start_date")
+        .reset_index(drop=True)
+    )
 
-    # Calculate gap in days from previous event end to current event start
-    gaps = np.r_[0, (start_dates[1:] - end_dates[:-1] - np.timedelta64(1, "D"))
-                 .astype("timedelta64[D]").astype(int)]
+    result = []
 
-    return pd.DataFrame({
-        "start_date": start_dates,
-        "end_date": end_dates,
-        "duration": duration,
-        "gap": gaps
-    })
+    # CASE 2: The Leading Gap
+    first_event_start = event_groups.iloc[0]["start_date"]
+    leading_gap = (first_event_start - record_start).days
+    if leading_gap > 0:
+        result.append(
+            {
+                "start_date": None,
+                "end_date": None,
+                "duration": 0,
+                "gap": leading_gap,
+                "area_days": 0.0,
+            }
+        )
+
+    # CASE 3: Events and their Following Gaps
+    num_events = len(event_groups)
+    for i in range(num_events):
+        curr_s = event_groups.iloc[i]["start_date"]
+        curr_e = event_groups.iloc[i]["end_date"]
+        # Pull the aggregated sum
+        area_days = event_groups.iloc[i]["area_days"]
+        duration = (curr_e - curr_s).days + 1
+
+        if i < num_events - 1:
+            next_s = event_groups.iloc[i + 1]["start_date"]
+            gap = (next_s - curr_e).days - 1
+        else:
+            gap = (record_end - curr_e).days
+
+        result.append(
+            {
+                "start_date": curr_s,
+                "end_date": curr_e,
+                "duration": duration,
+                "gap": gap,
+                "area_days": area_days,
+            }
+        )
+
+    return pd.DataFrame(result)
 
 
 # ------------------------------------------------------------------------------
 # Inundation detection with robust stats
 # ------------------------------------------------------------------------------
 
+
 def inundation_metrics(
     wit_data,
-    threshold,
-    shapefile,
-    skey,
+    threshold_df,
+    shapefile_path,
+    shapefile_key,
     debug_event_times=False,
     pkey="feature_id",
 ):
     """
-    Calculates metrics for inundation events for each feature.
+    Calculates inundation metrics for each feature in the batch.
+
+    For each feature:
+    1. Retrieves the adaptive threshold.
+    2. Generates the event table using `_event_table`.
+    3. Calculates statistics for each event (max/mean water, cumulative area-days).
+    4. Merges event details with statistics.
 
     Args:
-        wit_data (pd.DataFrame): Input WIT data.
-        threshold (pd.DataFrame or float): Threshold(s) for inundation.
-        shapefile (str): Path to shapefile for area lookup.
-        skey (str): Key in shapefile to match feature IDs.
-        debug_event_times (bool, optional): Whether to output debug event times. Defaults to False.
-        pkey (str, optional): Primary key column. Defaults to "feature_id".
+        wit_data (pd.DataFrame): Batch of WIT data.
+        threshold_df (pd.DataFrame | float): Thresholds for each feature.
+        shapefile_path (Path): Path to the shapefile for area lookup.
+        shapefile_key (str): Key in shapefile to match feature_id.
+        debug_event_times (bool): If True, saves intermediate event timing data.
+        pkey (str): Primary key column name.
 
     Returns:
-        pd.DataFrame: DataFrame containing inundation metrics for each event.
+        pd.DataFrame: DataFrame containing inundation events and metrics.
     """
     chunk = int(wit_data["chunk"].iat[0])
 
@@ -334,80 +413,119 @@ def inundation_metrics(
 
     # Area lookup
     area = None
-    if os.path.isfile(shapefile):
-        feats = shape_list(skey, df[pkey].unique(), shapefile)
-        area = get_areas(feats, pkey)
+    if Path(shapefile_path).is_file():
+        polys = shape_list(shapefile_key, df[pkey].unique(), shapefile_path)
+        area = get_areas(polys, pkey)
 
     events = []
-    event_times = [] 
+    event_times = []
     stats = []
 
-    for gid, g in df.groupby(pkey, group_keys=False, sort=False):
-        th = threshold.loc[gid].iat[0] if isinstance(threshold, pd.DataFrame) else threshold
-        ev = _event_table(g, th)
-        if ev.empty:
+    # Local threshold reference to avoid modifying the input variable in loop
+    for feature_id, group_df in df.groupby(pkey, group_keys=False, sort=False):
+        # Clean threshold lookup
+        if isinstance(threshold_df, pd.DataFrame):
+            # Use 'water+wet' if it exists, otherwise the first numeric column
+            thresh_col = (
+                "water+wet"
+                if "water+wet" in threshold_df.columns
+                else threshold_df.columns[0]
+            )
+            current_threshold = threshold_df.loc[feature_id, thresh_col]
+        else:
+            # Fallback for scalar input
+            current_threshold = threshold_df
+
+        event_df = _event_table(group_df, current_threshold)
+        if event_df.empty:
             continue
 
-        # Add feature_id and threshold
-        ev.insert(0, pkey, gid)
-        ev.insert(1, "threshold", th)
-        events.append(ev)
+        # Add metadata
+        event_df.insert(0, pkey, feature_id)
+        event_df.insert(1, "threshold", current_threshold)
+        events.append(event_df)
 
-        # Optional debug table
         if debug_event_times:
             event_times.append(
-                ev[[pkey, "threshold", "start_date", "end_date", "duration", "gap"]]
+                event_df[
+                    [pkey, "threshold", "start_date", "end_date", "duration", "gap"]
+                ]
             )
 
-        # Compute water metrics for all events
-        gvals = g.set_index("date")["water+wet"]
-        for _, r in ev.iterrows():
-            max_wet = gvals.loc[r.start_date:r.end_date].max()
-            mean_wet = gvals.loc[r.start_date:r.end_date].mean()
-            stats.append({
-                pkey: gid,
-                "start_date": r.start_date,
-                "max_water+wet": max_wet,
-                "mean_water+wet": mean_wet,
-                "max_wet_area": max_wet * area.loc[gid, "area"] if area is not None and gid in area.index else np.nan,
-                "mean_wet_area": mean_wet * area.loc[gid, "area"] if area is not None and gid in area.index else np.nan,
-            })
+        # Compute water metrics
+        gvals = group_df.set_index("date")["water+wet"]
+        feat_area = (
+            area.loc[feature_id, "area"]
+            if area is not None and feature_id in area.index
+            else np.nan
+        )
+
+        for _, r in event_df.iterrows():
+            # GOLDEN RULE GUARD: Skip stats calculation for gap-only rows
+            if pd.isna(r.start_date) or r.duration == 0:
+                stats.append(
+                    {
+                        pkey: feature_id,
+                        "start_date": r.start_date,
+                        "max_water+wet": np.nan,
+                        "mean_water+wet": np.nan,
+                        "max_wet_area": np.nan,
+                        "mean_wet_area": np.nan,
+                        "cum_area_days": 0.0,
+                    }
+                )
+                continue
+
+            # Standard stats for actual inundation events
+            event_slice = gvals.loc[r.start_date : r.end_date]
+            max_wet = event_slice.max()
+            mean_wet = event_slice.mean()
+
+            # INTEGRATION STEP:
+            # Physical area (m2) * fractional days (sum of water+wet)
+            cum_area_days = r.area_days * feat_area
+
+            # Mean physical area for this event
+            mean_area_m2 = mean_wet * feat_area
+
+            stats.append(
+                {
+                    pkey: feature_id,
+                    "start_date": r.start_date,
+                    "max_water+wet": max_wet,
+                    "mean_water+wet": mean_wet,
+                    "max_wet_area": max_wet * feat_area,
+                    "mean_wet_area": mean_area_m2,
+                    "cum_area_days": cum_area_days,
+                }
+            )
 
     if not events:
         return pd.DataFrame()
 
-    # Combine event tables
     event_df = pd.concat(events, ignore_index=True)
     if stats:
         st = pd.DataFrame(stats)
+        # Merging on pkey and start_date (which includes NaT)
         event_df = event_df.merge(st, on=[pkey, "start_date"], how="left")
 
-    # Convert dates to simple date format
+    # Date formatting (handling NaT gracefully)
     event_df["start_date"] = pd.to_datetime(event_df["start_date"]).dt.date
     event_df["end_date"] = pd.to_datetime(event_df["end_date"]).dt.date
 
-    # Write output
-    out = os.path.join(config.OUTPUT_DIR, f"WIT_inundation_metrics{chunk}.parquet")
+    # Output management
+    out = config.OUTPUT_DIR / f"WIT_inundation_metrics{chunk}.parquet"
     write_batch_parquet(event_df, out)
 
-    # Optional debug output
     if debug_event_times and event_times:
-        event_df = pd.concat(event_times, ignore_index=True)
-        event_df["start_date"] = pd.to_datetime(event_df["start_date"]).dt.date
-        event_df["end_date"] = pd.to_datetime(event_df["end_date"]).dt.date
+        debug_df = pd.concat(event_times, ignore_index=True)
+        debug_df["start_date"] = pd.to_datetime(debug_df["start_date"]).dt.date
+        debug_df["end_date"] = pd.to_datetime(debug_df["end_date"]).dt.date
         write_batch_parquet(
-            event_df,
-            os.path.join(config.OUTPUT_DIR, f"WIT_event_times{chunk}.parquet")
-        )
-        assert (
-            pd.read_parquet(os.path.join(config.OUTPUT_DIR, f"WIT_event_times{chunk}.parquet"))
-            .groupby([pkey, "start_date", "end_date"])
-            .size()
-            .max() == 1
+            debug_df, config.OUTPUT_DIR / f"WIT_event_times{chunk}.parquet"
         )
 
     return event_df
-
 
 
 def interpolate_daily(wit_data, pkey="feature_id"):
@@ -433,18 +551,13 @@ def interpolate_daily(wit_data, pkey="feature_id"):
         # numeric columns
         numeric = (
             g.select_dtypes("number")
-             .resample("D")
-             .mean()              # collapse same-day duplicates
-             .interpolate()
+            .resample("D")
+            .mean()  # collapse same-day duplicates
+            .interpolate()
         )
 
         # object columns
-        objects = (
-            g.select_dtypes("object")
-             .resample("D")
-             .first()
-             .ffill()
-        )
+        objects = g.select_dtypes("object").resample("D").first().ffill()
 
         daily = objects.join(numeric)
         daily[pkey] = gid
@@ -453,88 +566,113 @@ def interpolate_daily(wit_data, pkey="feature_id"):
     return pd.concat(out, ignore_index=True)
 
 
-
-
 # ------------------------------------------------------------------------------
 # Time since last inundation (correct for never-inundated)
 # ------------------------------------------------------------------------------
 
+
 def time_since_last_inundation(wit_data, wit_im, pkey="feature_id"):
     """
-    Calculates the time (in days) since the last inundation event for each feature.
-
-    Args:
-        wit_data (pd.DataFrame): Input WIT data (used for date range).
-        wit_im (pd.DataFrame): Inundation metrics DataFrame (contains event info).
-        pkey (str, optional): Primary key column. Defaults to "feature_id".
-
-    Returns:
-        pd.DataFrame: DataFrame with 'timesincelast' column.
+    Calculates time since last inundation using the 'Gap After' logic.
     """
     chunk = int(wit_data["chunk"].iat[0])
 
-    span = (
-        wit_data.groupby(pkey, group_keys=False)["date"]
-        .agg(first_date="min", final_date="max")
-        .reset_index()
-    )
-
-    if wit_im is not None and not wit_im.empty:
-        last = (
-            wit_im.groupby(pkey,group_keys=False)["end_date"]
-            .max()
+    # 1. Handle the 'Never Wet' case or missing metrics
+    if wit_im is None or wit_im.empty:
+        # Fallback: total record span per feature
+        span = (
+            wit_data.groupby(pkey, sort=False)["date"]
+            .agg(lambda x: (x.max() - x.min()).days)
             .reset_index()
-            .rename(columns={"end_date": "last_event"})
         )
-        span = span.merge(last, on=pkey, how="left")
-        span["last_event"] = pd.to_datetime(span["last_event"])
-        span["timesincelast"] = (
-            span["final_date"] - span["last_event"]
-        ).dt.days
+        span.columns = [pkey, "timesincelast"]
     else:
-        span["timesincelast"] = (
-            span["final_date"] - span["first_date"]
-        ).dt.days
+        # 2. Extract the gap from the very last record of each feature
+        # Since gaps now follow events, the 'timesincelast' is just the 'gap'
+        # of the final entry in the event table.
+        span = (
+            wit_im.sort_values([pkey, "end_date"], na_position="first")
+            .groupby(pkey, sort=False)
+            .tail(1)[[pkey, "gap"]]
+            .rename(columns={"gap": "timesincelast"})
+        )
 
-    span["timesincelast"] = span["timesincelast"].fillna(
-        (span["final_date"] - span["first_date"]).dt.days
-    )
-
-    out = os.path.join(
-        config.OUTPUT_DIR,
-        f"WIT_time_since_last_inundation{chunk}.parquet",
-    )
+    # 3. Save and return
+    span["chunk"] = chunk
+    out = config.OUTPUT_DIR / f"WIT_time_since_last_inundation{chunk}.parquet"
     write_batch_parquet(span, out)
+
     return span
 
 
-def all_time_median(wit_data, members=[["water", "wet"]], pkey="feature_id"):
+def adaptive_inundation_threshold(
+    wit_data,
+    members=[["water", "wet"]],
+    pkey="feature_id",
+    threshold_percentile=0.3,
+    min_threshold=0.05,
+    max_threshold=0.5,
+):
     """
-    Computes the all-time median for specified members.
+    Computes an adaptive inundation threshold for each feature.
+
+    Logic:
+    1. Calculates the specified percentile (e.g. 0.3 = 30th) of 'water+wet'.
+    2. Clips the result between `min_threshold` and `max_threshold`.
 
     Args:
         wit_data (pd.DataFrame): Input WIT data.
-        members (list, optional): List of members to compute median for. 
-                                  Defaults to [['water', 'wet']].
-        pkey (str, optional): Primary key column. Defaults to "feature_id".
+        members (list): List of columns to combine for the metric (default: water + wet).
+        pkey (str): Primary key column.
+        min_threshold (float): Minimum allowed threshold (floor).
+        max_threshold (float): Maximum allowed threshold (ceiling).
 
     Returns:
-        pd.DataFrame: DataFrame of medians indexed by pkey.
+        pd.DataFrame: DataFrame indexed by pkey with the calculated threshold.
     """
+
     chunk = int(wit_data["chunk"].iat[0])
-    wit_df = wit_data.copy(deep=True).drop(columns=["date", "chunk", "pc_missing"])
+
+    # 1. Identify and combine members
+    flat_members = list(set([item for sublist in members for item in sublist]))
+    wit_df = wit_data[[pkey] + flat_members].copy()
     wit_df = _add_combined_members(wit_df, members)
-    wit_median = wit_df.set_index(pkey).groupby(pkey).median()
-    out_file = os.path.join(
-        config.OUTPUT_DIR,
-        f"WIT_event_threshold{chunk}.parquet",
-    )
-    write_batch_parquet(wit_median.reset_index(), out_file)
-    return wit_median
+
+    # 2. Compute P30 (30th percentile)
+    # We use 'water+wet' specifically as the benchmark for inundation
+    # P30 is used to handle perennial water contamination by picking a lower baseline.
+    thresholds = wit_df.groupby(pkey)["water+wet"].quantile(threshold_percentile)
+
+    # 3. Adaptive Selection Logic
+    thresholds = thresholds.clip(lower=min_threshold, upper=max_threshold)
+
+    # Convert to DataFrame for consistent indexing in downstream joins
+    threshold_df = thresholds.to_frame(name="water+wet")
+
+    # 4. Safety Logging
+    total = len(threshold_df)
+
+    print(f"--- Chunk {chunk} Adaptive Threshold Summary ---")
+    print(f"Total features: {total}")
+    print(f"Using percentile {threshold_percentile}  for adaptive threshold.")
+    print(f"Ephemeral Floor ({min_threshold}) applied.")
+    print(f"Ephemeral Ceiling ({max_threshold}) applied.")
+    print("---------------------------------------")
+
+    # 5. Save and Return
+    out_file = config.OUTPUT_DIR / f"WIT_event_threshold{chunk}.parquet"
+    write_batch_parquet(threshold_df.reset_index(), out_file)
+
+    return threshold_df
 
 
 def merge_batches(
-    path, output_filenames, tag="RESULT", monthly_subset=["feature_id", "date", "water+wet_median"], labels_df=None, Labels_join_field="feature_id"
+    path,
+    output_filenames,
+    tag="RESULT",
+    monthly_subset=["feature_id", "date", "water+wet_median"],
+    labels_df=None,
+    Labels_join_field="feature_id",
 ):
     """
     Merges batch output files into single result files.
@@ -547,10 +685,10 @@ def merge_batches(
         labels_df (pd.DataFrame, optional): DataFrame to join with results (e.g., for labels).
         Labels_join_field (str, optional): Field to join labels on. Defaults to "feature_id".
     """
-    if tag:
-        tag = tag + "_"
+    path = Path(path)
+    tag = tag + "_" if tag else "RESULT_"
     for fname in output_filenames:
-        out_files = glob.glob(os.path.join(path, fname + "*.parquet"))
+        out_files = list(path.glob(f"{fname}*.parquet"))
         if out_files:
             result_fname = f"{tag}{fname}.csv"
             print(f"Merging {len(out_files)} batch outputs into {result_fname} ...")
@@ -559,11 +697,22 @@ def merge_batches(
                 try:
                     df = pd.read_parquet(out_file)
                     if monthly_subset and "monthly" in fname:
-                        dfs.append(df[monthly_subset])
+                        # Validate columns exist
+                        missing_cols = set(monthly_subset) - set(df.columns)
+                        if missing_cols:
+                            logger.warning(
+                                f"Monthly subset columns missing from {out_file}: {missing_cols}"
+                            )
+                            available_subset = [
+                                c for c in monthly_subset if c in df.columns
+                            ]
+                            dfs.append(df[available_subset])
+                        else:
+                            dfs.append(df[monthly_subset])
                     else:
                         dfs.append(df)
                 except Exception as ex:
-                    print(f"Error reading file: {out_file} - {ex}")
+                    logger.error(f"Error reading file: {out_file} - {ex}")
                     raise
             if dfs:
                 out_data = pd.concat(dfs)
@@ -579,10 +728,12 @@ def merge_batches(
 
                 compression = None
                 if config.ZIP_RESULT:
-                    compression={"method": "zip", "archive_name": result_fname}
+                    compression = {"method": "zip", "archive_name": result_fname}
                     result_fname = f"{tag}{fname}.zip"
                 try:
-                    out_data.round(4).to_csv(os.path.join(path, result_fname), index=False, compression=compression)
+                    out_data.round(4).to_csv(
+                        path / result_fname, index=False, compression=compression
+                    )
                 except Exception as ex:
                     print(f"Error writing merged file: {result_fname} - {ex}")
                     raise
@@ -593,14 +744,17 @@ def delete_old_batch_outputs(path, output_filenames):
     Deletes the individual batch results which are no longer required after they have been merged.
 
     Args:
-        path (str): Directory path.
+        path (pathlib.Path): Directory path.
         output_filenames (list): List of filename patterns to delete.
     """
+    path = Path(path)  # Ensure Path object
+    deleted_count = 0
+    error_count = 0
     for fname in output_filenames:
-        out_files = glob.glob(os.path.join(path, "./" + fname + "*.parquet"))
+        out_files = list(Path(path).glob(f"{fname}*.parquet"))
         for out_file in out_files:
             try:
-                os.remove(out_file)
+                out_file.unlink()
             except:
                 print("Error while deleting file : ", out_file)
 
@@ -609,9 +763,11 @@ def nice_time(s):
     """Formats seconds into a human-readable string."""
     return time.strftime("%H hours %M minutes %S seconds", time.gmtime(s))
 
+
 # ------------------------------------------------------------------------------
 # Batch loader
 # ------------------------------------------------------------------------------
+
 
 def load_batch(csv_files, chunk_id):
     """
@@ -631,35 +787,51 @@ def load_batch(csv_files, chunk_id):
         pd.DataFrame: Processed DataFrame for the batch.
     """
     dfs = []
+    pkey = config.WIT_FEATURE_ID
 
     for f in csv_files:
-        df = pd.read_csv(f)
+        try:
+            df = pd.read_csv(f)
+        except pd.errors.EmptyDataError:
+            logger.warning(f"Skipping empty CSV file: {f}")
+            continue
+        except Exception as e:
+            logger.error(f"Error reading {f}: {e}")
+            raise
+
+        if df.empty:
+            continue
 
         # 1. Filter missing data
         df = df[df["pc_missing"] < config.PC_MISSING_THRESHOLD]
+        if df.empty:
+            continue
 
-        # 2. Normalize dates immediately (strip time/timezone)
-        df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None).dt.normalize()
+        # 2. Robust Date Normalization
+        # Use format='mixed' to handle both "YYYY-MM-DD" and "YYYY-MM-DD HH:MM:SS"
+        df["date"] = (
+            pd.to_datetime(df["date"], utc=True, format="mixed")
+            .dt.tz_localize(None)
+            .dt.normalize()
+        )
 
         dfs.append(df)
 
     if not dfs:
+        logger.warning(
+            f"Chunk {chunk_id}: No valid data after loading {len(csv_files)} files"
+        )
         return None
 
-    # 3. Combine all files in the batch
+    # 3. Combine all files
     wit_data = pd.concat(dfs, ignore_index=True)
 
-    # 4. Collapse duplicates: Average numeric data by Feature and Date
-    # This handles overlapping data and ensures one row per day per feature
-    wit_data = (
-        wit_data.groupby([config.PKEY, "date"], as_index=False)
-        .mean(numeric_only=True)
-    )
+    # 4. Collapse duplicates
+    # Group by ID and Date to average observations from the same day
+    wit_data = wit_data.groupby([pkey, "date"], as_index=False).mean(numeric_only=True)
 
-    # 5. Critical: Sort chronologically for downstream np.diff logic
-    wit_data = wit_data.sort_values([config.PKEY, "date"]).reset_index(drop=True)
-
-    # Required by worker API
+    # 5. Final Sort
+    wit_data = wit_data.sort_values([pkey, "date"]).reset_index(drop=True)
     wit_data["chunk"] = chunk_id
 
     return wit_data
@@ -676,15 +848,21 @@ def write_batch_parquet(batch_df, batch_fname):
     Returns:
         str: The filename written to.
     """
+    tmp_out = Path(batch_fname).with_suffix(".tmp.parquet")
+
     try:
-        tmp_out = Path(batch_fname).with_suffix(".tmp.parquet")
+        # Write to temporary file
         batch_df.to_parquet(tmp_out, index=False)
+
+        # Atomic rename
         os.replace(tmp_out, batch_fname)
+
         logger.info(f"  Written batch output:  {batch_fname}")
+
     except Exception as e:
         logger.error(f"  Failed to write {batch_fname}: {e}")
         tmp_out.unlink(missing_ok=True)
-        raise
+        raise IOError(f"Parquet write failed for {batch_fname}") from e
 
     return batch_fname
 
@@ -692,6 +870,7 @@ def write_batch_parquet(batch_df, batch_fname):
 # ------------------------------------------------------------------------------
 # Batch processor (single process)
 # ------------------------------------------------------------------------------
+
 
 def process_batch(csv_files, chunk_id):
     """
@@ -721,11 +900,11 @@ def process_batch(csv_files, chunk_id):
 
         if config.SAVE_INTERPOLATED_CSV:
             # Note: This can be slow for very large batches
-            out_dir = os.path.join(config.OUTPUT_DIR, "csv_daily_interpolated")
+            out_dir = config.OUTPUT_DIR / "csv_daily_interpolated"
             os.makedirs(out_dir, exist_ok=True)
             # Efficiently save grouped CSVs
-            for fid, group in wit_data.groupby(config.PKEY, sort=False):
-                group.to_csv(os.path.join(out_dir, f"{fid}.csv"), index=False)
+            for fid, group in wit_data.groupby(config.WIT_FEATURE_ID, sort=False):
+                group.to_csv(out_dir / f"{fid}.csv", index=False)
 
     # 3. Monthly & Annual Metrics
     # Uses the single-pass _resample_metrics for high speed
@@ -734,27 +913,126 @@ def process_batch(csv_files, chunk_id):
 
     # 4. Inundation threshold (All-time median)
     # Calculates the threshold used for event detection
-    median_df = all_time_median(wit_data)
+    median_df = adaptive_inundation_threshold(
+        wit_data,
+        threshold_percentile=config.THRESHOLD_PERCENTILE,
+        min_threshold=config.MIN_THRESHOLD,
+        max_threshold=config.MAX_THRESHOLD,
+    )
     # Extract the specific column needed for _event_table
     threshold_df = pd.DataFrame(median_df["water+wet"])
 
     # 5. Inundation Metrics (The Core Analysis)
     # Vectorized event detection and area-weighted statistics
-    wit_im = inundation_metrics(
+    wit_inundation_events_df = inundation_metrics(
         wit_data,
-        threshold=threshold_df,
-        shapefile=config.POLYGON_PATH,
-        skey=config.POLY_UNIQUE_ID,
+        threshold_df=threshold_df,
+        shapefile_path=config.SHAPEFILE_PATH,
+        shapefile_key=config.SHAPEFILE_KEY,
         debug_event_times=config.DEBUG_EVENT_TIMES,
     )
 
     # 6. Time Since Last Inundation
     # Uses wit_data and the newly created wit_im to find the final dry gap
-    time_since_last_inundation(wit_data, wit_im)
+    time_since_last_inundation(wit_data, wit_inundation_events_df)
+
+
+# ------------------------------------------------------------------------------
+# Config validation
+# ------------------------------------------------------------------------------
+
+
+def validate_config():
+    """
+    Validates configuration before processing starts.
+    Catches issues early rather than failing hours into a batch job.
+    """
+    errors = []
+    warnings = []
+
+    # 1. Check critical paths exist
+    if not config.WIT_CSV_PATH.exists():
+        errors.append(f"WIT_CSV_PATH does not exist: {config.WIT_CSV_PATH}")
+
+    if not config.WIT_CSV_PATH.is_dir():
+        errors.append(f"WIT_CSV_PATH is not a directory: {config.WIT_CSV_PATH}")
+
+    # Check if shapefile exists (only if area lookup is enabled)
+    if config.SHAPEFILE_PATH and config.SHAPEFILE_PATH != Path(""):
+        if not config.SHAPEFILE_PATH.exists():
+            errors.append(f"SHAPEFILE_PATH does not exist: {config.SHAPEFILE_PATH}")
+        elif not config.SHAPEFILE_PATH.suffix == ".shp":
+            warnings.append(
+                f"SHAPEFILE_PATH doesn't have .shp extension: {config.SHAPEFILE_PATH}"
+            )
+
+    # Check value ranges
+    if not 0 <= config.PC_MISSING_THRESHOLD <= 1:
+        errors.append(
+            f"PC_MISSING_THRESHOLD must be between 0 and 1, got: {config.PC_MISSING_THRESHOLD}"
+        )
+
+    if config.BATCH_SIZE < 1:
+        errors.append(f"BATCH_SIZE must be >= 1, got: {config.BATCH_SIZE}")
+
+    if config.MIN_THRESHOLD < 0 or config.MIN_THRESHOLD > 1:
+        errors.append(
+            f"MIN_THRESHOLD must be between 0 and 1 (0.05 recommended), got: {config.MIN_THRESHOLD}"
+        )
+
+    if config.MAX_THRESHOLD < 0 or config.MAX_THRESHOLD > 1:
+        errors.append(
+            f"MAX_THRESHOLD must be between 0 and 1 (0.5 recommended), got: {config.MAX_THRESHOLD}"
+        )
+
+    # Check MONTHLY_SUBSET validity
+    if config.MONTHLY_SUBSET is not None:
+        required_cols = ["feature_id", "date"]
+        missing = [col for col in required_cols if col not in config.MONTHLY_SUBSET]
+        if missing:
+            errors.append(
+                f"MONTHLY_SUBSET must include {required_cols}, missing: {missing}"
+            )
+
+        # Should have at least one metric column
+        if len(config.MONTHLY_SUBSET) <= 2:
+            warnings.append(
+                "MONTHLY_SUBSET only has feature_id and date - no metrics selected"
+            )
+
+    # Try to create output directories
+    try:
+        config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        if not os.access(config.OUTPUT_DIR, os.W_OK):
+            errors.append(f"OUTPUT_DIR is not writable: {config.OUTPUT_DIR}")
+    except Exception as e:
+        errors.append(f"Cannot create OUTPUT_DIR {config.OUTPUT_DIR}: {e}")
+
+    # Report results
+    if warnings:
+        for w in warnings:
+            logger.warning(f"Config warning: {w}")
+
+    if errors:
+        error_msg = "Configuration validation failed:\n" + "\n".join(
+            f"  - {e}" for e in errors
+        )
+        raise ValueError(error_msg)
+
+    logger.info("Configuration validated successfully")
+
+    # Log key settings
+    logger.info(f"Processing settings:")
+    logger.info(f"  Input: {config.WIT_CSV_PATH}")
+    logger.info(f"  Output: {config.OUTPUT_DIR}")
+    logger.info(f"  Interpolate to daily: {config.INTERPOLATE_TO_DAILY}")
+    logger.info(f"  Batch size: {config.BATCH_SIZE}")
+    logger.info(f"  Missing threshold: {config.PC_MISSING_THRESHOLD}")
+
 
 if __name__ == "__main__":
 
-    os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+    validate_config()
 
     output_filenames = [
         "WIT_yearly_metrics",
@@ -771,7 +1049,7 @@ if __name__ == "__main__":
     # Cleanup old batch outputs
     delete_old_batch_outputs(config.OUTPUT_DIR, output_filenames)
 
-    csv_list = glob.glob(os.path.join(config.WIT_CSV_PATH, "*.csv"))
+    csv_list = list(config.WIT_CSV_PATH.glob("*.csv"))
     total_files = len(csv_list)
 
     if total_files == 0:
@@ -792,7 +1070,7 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     # Batch-level multiprocessing only
     # ------------------------------------------------------------------
-    for j in tqdm(range(0, total_files, chunk_size), desc="Processing chunks"):
+    for j in tqdm(range(0, total_files, chunk_size), desc=f"Processing chunks"):
         mpbatch = csv_list[j : j + chunk_size]
 
         work = []
@@ -816,11 +1094,10 @@ if __name__ == "__main__":
         config.OUTPUT_DIR,
         output_filenames,
         monthly_subset=config.MONTHLY_SUBSET,
-        tag=config.TAG
+        tag=config.TAG,
     )
 
     print("All batches merged successfully.")
 
     # Optional cleanup
     delete_old_batch_outputs(config.OUTPUT_DIR, output_filenames)
-
