@@ -5,7 +5,7 @@ __pycache__/
 csv_daily_interpolated/
 ANAEv3_WIT.*
 WIT_*
-VEWH*
 .coverage
+dev/
 
 
