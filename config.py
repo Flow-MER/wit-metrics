@@ -11,7 +11,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-
 @dataclass(frozen=True)
 class WITMetricsConfig:
 
@@ -29,7 +28,6 @@ class WITMetricsConfig:
 
     # Path to folder that contains the WIT csv files to process.  When debugging providing a single file might be prudent.
     wit_csv_path: Path = Path("input/csv")
-    wit_csv_path: Path = Path("m:\\ANAE_MDB_WIT_Feb_2026")
 
     # Only use WIT data where the pc_missing is less than the threshold (default is 0.1) i.e. >90% of the polygon was visible to satellites
     pc_missing_threshold: float = 0.1
@@ -46,18 +44,21 @@ class WITMetricsConfig:
     save_interpolated_csv: bool = False
 
     # monthly metrics files are too big for most computers when all metrics are used (e.g. just 4 metrics x 270,000 polygons x 450 months is a 5GB csv file)
-    # specify a subset that will be joined together into the monthly result - must include ["feature_id","date", at-least-one-metric]\
-    monthly_subset: Optional[List[str]] = None  # do not prune
-    # monthly_subset=[
-    #         "feature_id",
-    #         "date",
-    #         "water_median",
-    #         "wet_median",
-    #         "pv_median",
-    #         "npv_median",
-    #         "bs_median",
-    #         "count",
-    #     ]
+    # specify a subset that will be joined together into the monthly result - must include ["feature_id","date", at-least-one-metric]
+    # set to None or comment out all fields to save all metrics
+
+    monthly_subset: Optional[List[str]] = field(
+        default_factory=lambda: [
+            "feature_id",
+            "date",
+            "water_median",
+            "wet_median",
+            "pv_median",
+            "npv_median",
+            "bs_median",
+            "count",
+        ]
+    )
 
     # set to true to save intermediate data frames containing the event times and stats
     # these are saved in the working directory
@@ -88,108 +89,13 @@ class WITMetricsConfig:
     max_threshold: float = (
         0.50  # Cap for very wet sites. permanent lake is still considered inundated until falls below 50% water by area
     )
-    
-   
-    def __post_init__(self):
-        """
-        Validates configuration before processing starts.
-        Catches issues early rather than failing hours into a batch job.
-        """
-        errors = []
-        warnings = []
 
-        # 1. Check critical paths exist
-        # Ensure paths are Path objects
-        object.__setattr__(self, "wit_csv_path", Path(self.wit_csv_path))
-        object.__setattr__(self, "shapefile_path", 
-                   Path(self.shapefile_path) if self.shapefile_path else None)
-        object.__setattr__(self, "output_dir", Path(self.output_dir))
-        object.__setattr__(self, "log_dir", Path(self.log_dir)) 
-        
+# named config simplifies reuse in other projects
+CONFIGS = {"wit_metrics": WITMetricsConfig}
 
-        if not self.wit_csv_path.is_dir():
-            errors.append(f"wit_csv_path is not a directory: {self.wit_csv_path}")
-
-        # Check if shapefile exists (only if area lookup is enabled)
-        if self.shapefile_path is not None:
-            if not self.shapefile_path.exists():
-                errors.append(f"shapefile_path does not exist: {self.shapefile_path}")
-            if not self.shapefile_path.suffix == ".shp":
-                warnings.append(
-                    f"shapefile_path doesn't have .shp extension: {self.shapefile_path}"
-                )
-
-        # Check value ranges
-        if not 0 <= self.pc_missing_threshold <= 1:
-            errors.append(
-                f"pc_missing_threshold must be between 0 and 1, got: {self.pc_missing_threshold}"
-            )
-
-        if self.batch_size < 1:
-            errors.append(f"BATCH_SIZE must be >= 1, got: {self.batch_size}")
-
-        if self.threshold_percentile < 0 or self.threshold_percentile > 1:
-            errors.append(
-                f"threshold_percentile must be between 0 and 1 (0.3 recommended), got: {self.threshold_percentile}"
-            )
-
-        if self.min_threshold < 0 or self.min_threshold > 1:
-            errors.append(
-                f"min_threshold must be between 0 and 1 (0.05 recommended), got: {self.min_threshold}"
-            )
-
-        if self.max_threshold < 0 or self.max_threshold > 1:
-            errors.append(
-                f"max_threshold must be between 0 and 1 (0.5 recommended), got: {self.max_threshold}"
-            )
-
-        # Check MONTHLY_SUBSET validity
-        if self.monthly_subset is not None:
-            required_cols = ["feature_id", "date"]
-            missing = [col for col in required_cols if col not in self.monthly_subset]
-            if missing:
-                errors.append(
-                    f"monthly_subset must include {required_cols}, missing: {missing}"
-                )
-
-            # Should have at least one metric column
-            if len(self.monthly_subset) <= 2:
-                warnings.append(
-                    "monthly_subset only has feature_id and date - no metrics selected"
-                )
-
-        
-        # Report results
-        if warnings:
-            for w in warnings:
-                logger.warning(f"Config warning: {w}")
-
-        if errors:
-            error_msg = "Configuration validation failed:\n" + "\n".join(
-                f"  - {e}" for e in errors
-            )
-            raise ValueError(error_msg)
-
-        logger.info("Configuration validated successfully")
-
-        # Log key settings
-        logger.debug(f"Processing settings:")
-        logger.debug(f"  Input: {self.wit_csv_path}")
-        logger.debug(f"  Output: {self.output_dir}")
-        logger.debug(f"  Interpolate to daily: {self.interpolate_to_daily}")
-        logger.debug(f"  Batch size: {self.batch_size}")
-        logger.debug(f"  Missing threshold: {self.pc_missing_threshold}")
-        logger.debug(f"  Threshold percentile: {self.threshold_percentile}")
-        logger.debug(f"  Min threshold: {self.min_threshold}")
-        logger.debug(f"  Max threshold: {self.max_threshold}")
-        logger.debug(f"  Monthly subset: {self.monthly_subset}")
-        logger.debug(f"  Debug event times: {self.debug_event_times}")
-        logger.debug(f"  Shapefile path: {self.shapefile_path}")
-        logger.debug(f"  Shapefile key: {self.shapefile_key}")
-        logger.debug(f"  Zip result: {self.zip_result}")
-
-
-# ###########################################################
-    @staticmethod
-    def load_config() -> "WITMetricsConfig":
-        return WITMetricsConfig()
+def load_config(name: str):
+    if name not in CONFIGS:
+        valid_configs = ", ".join(CONFIGS.keys())
+        raise ValueError(f"Unknown config: {name}. Valid configs are: {valid_configs}")
+    else:
+        return CONFIGS[name]()

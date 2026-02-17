@@ -26,9 +26,78 @@ import multiprocessing
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 import logging
 
-from config import WITMetricsConfig
+from config import WITMetricsConfig, load_config
 
 logger = logging.getLogger(__name__)
+
+# ------------------------------------------------------------------------------
+# validate inputs
+# ------------------------------------------------------------------------------
+
+def validate_config(config: WITMetricsConfig) -> None:
+    """
+    Validates configuration before processing starts.
+    Catches issues early rather than failing hours into a batch job.
+    """
+    errors = []
+    warnings = []
+
+    # 1. Check critical paths exist
+    if not config.wit_csv_path.is_dir():
+        errors.append(f"wit_csv_path is not a directory: {config.wit_csv_path}")
+
+    # Check if shapefile exists (only if area lookup is enabled)
+    if config.shapefile_path is not None:
+        if not config.shapefile_path.exists():
+            errors.append(f"shapefile_path does not exist: {config.shapefile_path}")
+        if not config.shapefile_path.suffix == ".shp":
+            warnings.append(
+                f"shapefile_path doesn't have .shp extension: {config.shapefile_path}"
+            )
+
+    # Check value ranges
+    if not 0 <= config.pc_missing_threshold <= 1:
+        errors.append(
+            f"pc_missing_threshold must be between 0 and 1, got: {config.pc_missing_threshold}"
+        )
+
+    if config.batch_size < 1:
+        errors.append(f"BATCH_SIZE must be >= 1, got: {config.batch_size}")
+
+    if config.threshold_percentile < 0 or config.threshold_percentile > 1:
+        errors.append(
+            f"threshold_percentile must be between 0 and 1 (0.3 recommended), got: {config.threshold_percentile}"
+        )
+
+    if config.min_threshold < 0 or config.min_threshold > 1:
+        errors.append(
+            f"min_threshold must be between 0 and 1 (0.05 recommended), got: {config.min_threshold}"
+        )
+
+    if config.max_threshold < 0 or config.max_threshold > 1:
+        errors.append(
+            f"max_threshold must be between 0 and 1 (0.5 recommended), got: {config.max_threshold}"
+        )
+
+    # Check MONTHLY_SUBSET validity
+    if config.monthly_subset is not None:
+        required_cols = ["feature_id", "date"]
+        missing = [col for col in required_cols if col not in config.monthly_subset]
+        if missing or len(config.monthly_subset) <= 2:
+            errors.append(
+                f"monthly_subset must include {required_cols} and at least one metric column"
+            )
+
+    # Report results
+    if warnings:
+        for w in warnings:
+            logger.warning(f"Config warning: {w}")
+
+    if errors:
+        error_msg = "Configuration validation failed:\n" + "\n".join(
+            f"  - {e}" for e in errors
+        )
+        raise ValueError(error_msg)
 
 # ------------------------------------------------------------------------------
 # Geometry helpers
@@ -732,7 +801,7 @@ def merge_batches(
                 compression = None
                 if zip_result:
                     compression = {"method": "zip", "archive_name": result_fname}
-                    result_fname = f"{tag}{fname}.zip"
+                    result_fname = Path(result_fname).with_suffix("zip")
                 try:
                     out_data.round(4).to_csv(
                         path / result_fname, index=False, compression=compression
@@ -949,7 +1018,9 @@ def process_batch(
 
 
 def main() -> None:
-    config = WITMetricsConfig.load_config()
+    config:WITMetricsConfig = load_config("wit_metrics")
+    validate_config(config)
+
 
 
     output_filenames = [
