@@ -4,8 +4,6 @@ import numpy as np
 from pathlib import Path
 import sys
 
-# Ensure we can import from the parent directory
-sys.path.append(str(Path(__file__).parents[1]))
 from config import WITMetricsConfig
 
 @pytest.fixture
@@ -84,7 +82,7 @@ def test_event_table_gap_after_logic():
     3. Golden Rule (Total Span) is preserved.
     """
     from wit_metrics_worker import _event_table
-    
+
     # 10 day sequence: 2 days dry, 3 days wet, 5 days dry
     dates = pd.date_range("2023-01-01", periods=10, freq="D")
     data = {
@@ -92,18 +90,18 @@ def test_event_table_gap_after_logic():
         "water+wet": [0.1, 0.1, 0.8, 0.8, 0.8, 0.1, 0.1, 0.1, 0.1, 0.1]
     }
     df = pd.DataFrame(data)
-    
+
     ev = _event_table(df, threshold=0.5)
-    
+
     # Golden Rule: 10 days total
     assert ev["duration"].sum() + ev["gap"].sum() == 10
     assert len(ev) == 2  # One leading gap, one event with trailing gap
-    
+
     # Row 0: Leading Gap (Jan 1 - Jan 2)
     assert ev.iloc[0]["duration"] == 0
     assert ev.iloc[0]["gap"] == 2
     assert pd.isna(ev.iloc[0]["start_date"])
-    
+
     # Row 1: Event + Trailing Gap (Jan 3 - Jan 5 = 3 days; Jan 6 - Jan 10 = 5 days)
     assert ev.iloc[1]["duration"] == 3
     assert ev.iloc[1]["gap"] == 5
@@ -171,9 +169,9 @@ def test_event_table_never_wet():
     from wit_metrics_worker import _event_table
     dates = pd.date_range("2023-01-01", periods=100, freq="D")
     df = pd.DataFrame({"date": dates, "water+wet": [0.1]*100})
-    
+
     ev = _event_table(df, threshold=0.5)
-    
+
     assert len(ev) == 1
     assert ev.iloc[0]["duration"] == 0
     assert ev.iloc[0]["gap"] == 100
@@ -254,7 +252,7 @@ def test_event_table_three_state_model():
     """
     from wit_metrics_worker import _event_table
     import pandas as pd
-    
+
     # 10 day sequence
     dates = pd.date_range("2023-01-01", periods=10, freq="D")
     data = {
@@ -268,24 +266,24 @@ def test_event_table_three_state_model():
         ]
     }
     df = pd.DataFrame(data)
-    
+
     # Threshold set at 0.3 (The Normal -> Wet transition)
     threshold = 0.3
     ev = _event_table(df, threshold=threshold)
-    
+
     # Golden Rule: 10 days total
     assert ev["duration"].sum() + ev["gap"].sum() == 10
-    
+
     # Expected Structure:
     # Row 0: Leading Gap (Dry + Normal) = 4 days
     # Row 1: Wet Event (2 days) + Trailing Gap (Normal + Dry) = 4 days
-    
+
     assert len(ev) == 2
-    
+
     # Row 0: Leading Gap includes the transition from Dry to Normal
     assert ev.iloc[0]["gap"] == 4
     assert ev.iloc[0]["duration"] == 0
-    
+
     # Row 1: The 'Wet' event
     assert ev.iloc[1]["start_date"] == pd.Timestamp("2023-01-05")
     assert ev.iloc[1]["duration"] == 2

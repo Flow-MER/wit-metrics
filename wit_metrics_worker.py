@@ -43,7 +43,7 @@ def validate_config(config: WITMetricsConfig) -> None:
     warnings = []
 
     # 1. Check critical paths exist
-    if not config.wit_csv_path.is_dir():
+    if not config.wit_csv_path.exists():
         errors.append(f"wit_csv_path is not a directory: {config.wit_csv_path}")
 
     # Check if shapefile exists (only if area lookup is enabled)
@@ -225,7 +225,7 @@ def _resample_metrics(df: pd.DataFrame, freq: str, pkey: str) -> pd.DataFrame:
 
 def annual_metrics(
     wit_data: pd.DataFrame,
-    output_dir: Path,
+    output_path: Path,
     members: Optional[List[Any]] = None,
     pkey: str = "feature_id",
 ) -> pd.DataFrame:
@@ -269,7 +269,7 @@ def annual_metrics(
     res.insert(1, "year", res["date"].dt.year)
 
     # 5. Save output
-    out = output_dir / f"WIT_yearly_metrics{chunk}.parquet"
+    out = output_path / f"WIT_yearly_metrics{chunk}.parquet"
     write_batch_parquet(res, out)
 
     return res
@@ -277,7 +277,7 @@ def annual_metrics(
 
 def monthly_metrics(
     wit_data: pd.DataFrame,
-    output_dir: Path,
+    output_path: Path,
     members: Optional[List[Any]] = None,
     pkey: str = "feature_id",
 ) -> pd.DataFrame:
@@ -317,7 +317,7 @@ def monthly_metrics(
     res.insert(1, "month", res["date"].dt.month)
     res.insert(1, "year", res["date"].dt.year)
 
-    out = output_dir / f"WIT_monthly_metrics{chunk}.parquet"
+    out = output_path / f"WIT_monthly_metrics{chunk}.parquet"
     write_batch_parquet(res, out)
     return res
 
@@ -443,7 +443,7 @@ def inundation_metrics(
     threshold_df: Union[pd.DataFrame, float],
     shapefile_path: Path,
     shapefile_key: str,
-    output_dir: Path,
+    output_path: Path,
     debug_event_times: bool = False,
     pkey: str = "feature_id",
 ) -> pd.DataFrame:
@@ -583,7 +583,7 @@ def inundation_metrics(
     event_df["end_date"] = pd.to_datetime(event_df["end_date"]).dt.date
 
     # Output management
-    out = output_dir / f"WIT_inundation_metrics{chunk}.parquet"
+    out = output_path / f"WIT_inundation_metrics{chunk}.parquet"
     write_batch_parquet(event_df, out)
 
     if debug_event_times and event_times:
@@ -591,7 +591,7 @@ def inundation_metrics(
         debug_df["start_date"] = pd.to_datetime(debug_df["start_date"]).dt.date
         debug_df["end_date"] = pd.to_datetime(debug_df["end_date"]).dt.date
         write_batch_parquet(
-            debug_df, output_dir / f"WIT_event_times{chunk}.parquet"
+            debug_df, output_path / f"WIT_event_times{chunk}.parquet"
         )
 
     return event_df
@@ -643,7 +643,7 @@ def interpolate_daily(
 
 
 def time_since_last_inundation(
-    wit_data: pd.DataFrame, wit_im: Optional[pd.DataFrame], output_dir: Path, pkey: str = "feature_id"
+    wit_data: pd.DataFrame, wit_im: Optional[pd.DataFrame], output_path: Path, pkey: str = "feature_id"
 ) -> pd.DataFrame:
     """
     Calculates time since last inundation using the 'Gap After' logic.
@@ -672,7 +672,7 @@ def time_since_last_inundation(
 
     # 3. Save and return
     span["chunk"] = chunk
-    out = output_dir / f"WIT_time_since_last_inundation{chunk}.parquet"
+    out = output_path / f"WIT_time_since_last_inundation{chunk}.parquet"
     write_batch_parquet(span, out)
 
     return span
@@ -680,7 +680,7 @@ def time_since_last_inundation(
 
 def adaptive_inundation_threshold(
     wit_data: pd.DataFrame,
-    output_dir: Path,
+    output_path: Path,
     members: Optional[List[List[str]]] = None,
     pkey: str = "feature_id",
     threshold_percentile: float = 0.3,
@@ -731,7 +731,7 @@ def adaptive_inundation_threshold(
     logger.debug(f"Chunk {chunk} has {total} features. Adaptive inundation threshold {threshold_percentile}  with Floor ({min_threshold}) and Ceiling ({max_threshold}).")
 
     # 5. Save and Return
-    out_file = output_dir / f"WIT_event_threshold{chunk}.parquet"
+    out_file = output_path / f"WIT_event_threshold{chunk}.parquet"
     write_batch_parquet(threshold_df.reset_index(), out_file)
 
     return threshold_df
@@ -880,6 +880,7 @@ def load_batch(
 
         # 1. Filter missing data
         df = df[df["pc_missing"] < config.pc_missing_threshold]
+        print()
         if df.empty:
             continue
 
@@ -978,22 +979,22 @@ def process_batch(
 
         if config.save_interpolated_csv:
             # Note: This can be slow for very large batches
-            out_dir = config.output_dir / "csv_daily_interpolated"
-            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = config.output_path / "csv_daily_interpolated"
+            out_path.mkdir(parents=True, exist_ok=True)
             # Efficiently save grouped CSVs
             for fid, group in wit_data.groupby(config.wit_feature_id, sort=False):
-                group.to_csv(out_dir / f"{fid}.csv", index=False)
+                group.to_csv(out_path / f"{fid}.csv", index=False)
 
     # 3. Monthly & Annual Metrics
     # Uses the single-pass _resample_metrics for high speed
-    monthly_metrics(wit_data, config.output_dir)
-    annual_metrics(wit_data, config.output_dir)
+    monthly_metrics(wit_data, config.output_path)
+    annual_metrics(wit_data, config.output_path)
 
     # 4. Inundation threshold (All-time median)
     # Calculates the threshold used for event detection
     median_df = adaptive_inundation_threshold(
         wit_data,
-        config.output_dir,
+        config.output_path,
         threshold_percentile=config.threshold_percentile,
         min_threshold=config.min_threshold,
         max_threshold=config.max_threshold,
@@ -1008,13 +1009,13 @@ def process_batch(
         threshold_df=threshold_df,
         shapefile_path=config.shapefile_path,
         shapefile_key=config.shapefile_key,
-        output_dir=config.output_dir,
+        output_path=config.output_path,
         debug_event_times=config.debug_event_times,
     )
 
     # 6. Time Since Last Inundation
     # Uses wit_data and the newly created wit_im to find the final dry gap
-    time_since_last_inundation(wit_data, wit_inundation_events_df, config.output_dir)
+    time_since_last_inundation(wit_data, wit_inundation_events_df, config.output_path)
 
 
 def main() -> None:
@@ -1043,12 +1044,12 @@ def main() -> None:
     
     # Try to create output directories
     try:
-        config.output_dir.mkdir(parents=True, exist_ok=True)
+        config.output_path.mkdir(parents=True, exist_ok=True)
     except Exception as e:
-        raise RuntimeError(f"Cannot create OUTPUT_DIR {config.output_dir}: {e}")
+        raise RuntimeError(f"Cannot create OUTPUT_PATH {config.output_path}: {e}")
     
     # Cleanup any old batch outputs from prior runs
-    delete_old_batch_outputs(config.output_dir, output_filenames)
+    delete_old_batch_outputs(config.output_path, output_filenames)
 
     # Conservative core usage (important for IO-bound workload reading many csv)
     CPU = max(1, multiprocessing.cpu_count() // 2)
@@ -1085,7 +1086,7 @@ def main() -> None:
     # Merge batch outputs
     # ------------------------------------------------------------------
     merge_batches(
-        config.output_dir,
+        config.output_path,
         output_filenames,
         monthly_subset=config.monthly_subset,
         tag=config.tag,
@@ -1095,7 +1096,7 @@ def main() -> None:
     logger.info("All batches merged successfully.")
 
     # cleanup intermediate files
-    delete_old_batch_outputs(config.output_dir, output_filenames)
+    delete_old_batch_outputs(config.output_path, output_filenames)
 
 
 

@@ -14,9 +14,8 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class WITMetricsConfig:
 
-    input_dir: Path = Path("input")
-    output_dir: Path = Path("output")
-    log_dir: Path = Path("log")
+    output_path: Path = Path("output")
+    log_path: Path = Path("log")
 
     # shapefile: the shape file mentioned above to find the  and get their area
     # set to None to disable area lookup
@@ -62,7 +61,7 @@ class WITMetricsConfig:
 
     # set to true to save intermediate data frames containing the event times and stats
     # these are saved in the working directory
-    debug_event_times: bool = True
+    debug_event_times: bool = False
 
     # batchsize is the number of WIT csv files to include in each 'batch' that is processed by each single CPU core.
     # The code was designed to process several 100,000 polygons in small batches that fit into the computer memory
@@ -77,7 +76,7 @@ class WITMetricsConfig:
     tag: str = "RESULT"
 
     # Whether to zip the final result csv to save space (python/pandas can read the csv from the zips)
-    zip_result: bool = False
+    zip_result: bool = True
 
     # define threshold and bounds to define inundation events
     threshold_percentile: float = (
@@ -89,6 +88,17 @@ class WITMetricsConfig:
     max_threshold: float = (
         0.50  # Cap for very wet sites. permanent lake is still considered inundated until falls below 50% water by area
     )
+    
+    # -----------------------------------------------------------------
+    
+    project_root: Path = field(
+        default=Path(__file__).resolve().parent, init=False
+    )
+    def __post_init__(self):
+        object.__setattr__(self, "output_path", self.project_root / self.output_path)
+        object.__setattr__(self, "shapefile_path", self.project_root / self.shapefile_path)
+        object.__setattr__(self, "log_path", self.project_root / self.log_path)
+
 
 # named config simplifies reuse in other projects
 CONFIGS = {"wit_metrics": WITMetricsConfig}
