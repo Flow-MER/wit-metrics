@@ -671,7 +671,7 @@ def time_since_last_inundation(
         )
 
     # 3. Save and return
-    span["chunk"] = chunk
+    #span["chunk"] = chunk
     out = output_path / f"WIT_time_since_last_inundation{chunk}.parquet"
     write_batch_parquet(span, out)
 
@@ -801,7 +801,7 @@ def merge_batches(
                 compression = None
                 if zip_result:
                     compression = {"method": "zip", "archive_name": result_fname}
-                    result_fname = Path(result_fname).with_suffix("zip")
+                    result_fname = Path(result_fname).with_suffix(".zip")
                 try:
                     out_data.round(4).to_csv(
                         path / result_fname, index=False, compression=compression
