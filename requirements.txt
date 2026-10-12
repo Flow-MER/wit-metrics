@@ -5,3 +5,4 @@ shapely
 tqdm
 pandas
 pytest-cov
+pyarrow

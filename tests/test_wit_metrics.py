@@ -1,24 +1,31 @@
-import pytest
+import gc
+import weakref
+from zipfile import ZipFile
+
 import pandas as pd
-import numpy as np
-from pathlib import Path
-import sys
+import pytest
 
 from config import WITMetricsConfig
+
 
 @pytest.fixture
 def complex_wit_data():
     """15-day sequence with two distinct events and irregular dates."""
     data = {
-        "date": pd.to_datetime([
-            "2023-01-01", "2023-01-03", # Event 1
-            "2023-01-05",                # Gap
-            "2023-01-06", "2023-01-08", # Event 2
-            "2023-01-11", "2023-01-12", # Event 2 continues
-            "2023-01-15"                 # Trailing Gap
-        ]),
+        "date": pd.to_datetime(
+            [
+                "2023-01-01",
+                "2023-01-03",  # Event 1
+                "2023-01-05",  # Gap
+                "2023-01-06",
+                "2023-01-08",  # Event 2
+                "2023-01-11",
+                "2023-01-12",  # Event 2 continues
+                "2023-01-15",  # Trailing Gap
+            ]
+        ),
         "feature_id": ["A"] * 8,
-        "water+wet": [0.6, 0.6, 0.1, 0.6, 0.6, 0.6, 0.6, 0.1]
+        "water+wet": [0.6, 0.6, 0.1, 0.6, 0.6, 0.6, 0.6, 0.1],
     }
     return pd.DataFrame(data)
 
@@ -27,8 +34,8 @@ def complex_wit_data():
 def wit_config(tmp_path):
     return WITMetricsConfig(
         wit_csv_path=tmp_path,
-        output_dir=tmp_path,
-        log_dir=tmp_path,
+        output_path=tmp_path,
+        log_path=tmp_path,
         shapefile_path=None,
     )
 
@@ -36,24 +43,46 @@ def wit_config(tmp_path):
 ## --- 1. Data Loading (load_batch) ---
 
 
+def test_load_batch_does_not_scroll_progress(tmp_path, wit_config, capsys):
+    """Loading CSVs must not push terminal or notebook progress off screen."""
+    from wit_metrics_worker import load_batch
+
+    csv_files = []
+    for feature_id in ["A", "B", "C"]:
+        csv_file = tmp_path / f"{feature_id}.csv"
+        pd.DataFrame(
+            {
+                "feature_id": [feature_id],
+                "date": ["2023-01-01"],
+                "pc_missing": [0.0],
+                "water+wet": [0.5],
+            }
+        ).to_csv(csv_file, index=False)
+        csv_files.append(csv_file)
+
+    result = load_batch(csv_files, 0, wit_config)
+
+    assert result["feature_id"].tolist() == ["A", "B", "C"]
+    captured = capsys.readouterr()
+    assert (captured.out, captured.err) == ("", "")
+
+
 def test_load_batch_robustness(tmp_path, wit_config):
     """Verifies mixed date formats, filtering, and duplicate averaging."""
     from wit_metrics_worker import load_batch
+
     csv_path = tmp_path / "robust_batch.csv"
 
-    pd.DataFrame({
-        "feature_id": ["A", "A", "A", "B"],
-        # MIXED FORMATS: Full ISO, simplified date, and space-separated
-        "date": [
-            "2023-01-01T10:00:00Z", 
-            "2023-01-01", 
-            "2023-01-02 12:00:00", 
-            "2023-01-01"
-        ],
-        "water": [0.2, 0.4, 0.5, 0.6], 
-        "wet": [0.1, 0.1, 0.1, 0.2],
-        "pc_missing": [0, 0, 0.95, 0] # Index 2 filtered
-    }).to_csv(csv_path, index=False)
+    pd.DataFrame(
+        {
+            "feature_id": ["A", "A", "A", "B"],
+            # MIXED FORMATS: Full ISO, simplified date, and space-separated
+            "date": ["2023-01-01T10:00:00Z", "2023-01-01", "2023-01-02 12:00:00", "2023-01-01"],
+            "water": [0.2, 0.4, 0.5, 0.6],
+            "wet": [0.1, 0.1, 0.1, 0.2],
+            "pc_missing": [0, 0, 0.95, 0],  # Index 2 filtered
+        }
+    ).to_csv(csv_path, index=False)
 
     df = load_batch([str(csv_path)], chunk_id=1, config=wit_config)
 
@@ -65,6 +94,7 @@ def test_load_batch_robustness(tmp_path, wit_config):
 
 def test_load_batch_empty_scenarios(tmp_path, wit_config):
     from wit_metrics_worker import load_batch
+
     for content in ["", "feature_id,date,water,wet,pc_missing\n"]:
         csv_path = tmp_path / "empty_test.csv"
         csv_path.write_text(content)
@@ -73,6 +103,7 @@ def test_load_batch_empty_scenarios(tmp_path, wit_config):
 
 
 ## --- 2. Threshold Logic (_event_table) ---
+
 
 def test_event_table_gap_after_logic():
     """
@@ -85,10 +116,7 @@ def test_event_table_gap_after_logic():
 
     # 10 day sequence: 2 days dry, 3 days wet, 5 days dry
     dates = pd.date_range("2023-01-01", periods=10, freq="D")
-    data = {
-        "date": dates,
-        "water+wet": [0.1, 0.1, 0.8, 0.8, 0.8, 0.1, 0.1, 0.1, 0.1, 0.1]
-    }
+    data = {"date": dates, "water+wet": [0.1, 0.1, 0.8, 0.8, 0.8, 0.1, 0.1, 0.1, 0.1, 0.1]}
     df = pd.DataFrame(data)
 
     ev = _event_table(df, threshold=0.5)
@@ -107,12 +135,14 @@ def test_event_table_gap_after_logic():
     assert ev.iloc[1]["gap"] == 5
     assert ev.iloc[1]["start_date"] == pd.Timestamp("2023-01-03")
 
+
 ## --- 3. Metrics Workflow (inundation_metrics) ---
 
 
 def test_inundation_with_leading_gap(complex_wit_data):
-    from wit_metrics_worker import _event_table
     import pandas as pd
+
+    from wit_metrics_worker import _event_table
 
     df = complex_wit_data.copy()
     # Force the dates to be a clean daily sequence
@@ -147,18 +177,20 @@ def test_time_since_last_inundation_simple(tmp_path):
     from wit_metrics_worker import time_since_last_inundation
 
     # Simulate a wit_im table where the last event has a 91 day trailing gap
-    wit_im = pd.DataFrame({
-        "feature_id": ["A", "A"],
-        "start_date": [pd.Timestamp("1986-10-27"), pd.Timestamp("1988-06-23")],
-        "end_date": [pd.Timestamp("1987-11-17"), pd.Timestamp("1992-09-24")],
-        "duration": [387, 1555],
-        "gap": [218, 91] # The 91 is the 'time since last'
-    })
+    wit_im = pd.DataFrame(
+        {
+            "feature_id": ["A", "A"],
+            "start_date": [pd.Timestamp("1986-10-27"), pd.Timestamp("1988-06-23")],
+            "end_date": [pd.Timestamp("1987-11-17"), pd.Timestamp("1992-09-24")],
+            "duration": [387, 1555],
+            "gap": [218, 91],  # The 91 is the 'time since last'
+        }
+    )
 
     # Dummy wit_data just for chunk ID
     wit_data = pd.DataFrame({"feature_id": ["A"], "chunk": [1]})
 
-    result = time_since_last_inundation(wit_data, wit_im, output_dir=tmp_path)
+    result = time_since_last_inundation(wit_data, wit_im, output_path=tmp_path)
 
     assert result[result["feature_id"] == "A"]["timesincelast"].iloc[0] == 91
 
@@ -167,8 +199,9 @@ def test_time_since_last_inundation_simple(tmp_path):
 
 def test_event_table_never_wet():
     from wit_metrics_worker import _event_table
+
     dates = pd.date_range("2023-01-01", periods=100, freq="D")
-    df = pd.DataFrame({"date": dates, "water+wet": [0.1]*100})
+    df = pd.DataFrame({"date": dates, "water+wet": [0.1] * 100})
 
     ev = _event_table(df, threshold=0.5)
 
@@ -176,17 +209,18 @@ def test_event_table_never_wet():
     assert ev.iloc[0]["duration"] == 0
     assert ev.iloc[0]["gap"] == 100
 
+
 def test_threshold_floor_and_strictly_greater():
-    from wit_metrics_worker import _event_table
     import pandas as pd
+
+    from wit_metrics_worker import _event_table
 
     # Threshold is 0.05 (due to floor)
     # Day 1: 0.05 (Should be GAP because 0.05 is not > 0.05)
     # Day 2: 0.06 (Should be EVENT)
-    df = pd.DataFrame({
-        "date": pd.date_range("2023-01-01", periods=2, freq="D"),
-        "water+wet": [0.05, 0.06]
-    })
+    df = pd.DataFrame(
+        {"date": pd.date_range("2023-01-01", periods=2, freq="D"), "water+wet": [0.05, 0.06]}
+    )
 
     ev = _event_table(df, threshold=0.05)
 
@@ -199,33 +233,33 @@ def test_threshold_floor_and_strictly_greater():
 
 
 def test_adaptive_inundation_threshold_p30(tmp_path):
-    from wit_metrics_worker import adaptive_inundation_threshold
     import pandas as pd
-    import numpy as np
+
+    from wit_metrics_worker import adaptive_inundation_threshold
 
     # A: Ephemeral (90% dry) -> P30=0, Median=0
-    vals_A = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.8]
+    vals_a = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.8]
 
     # B: Variable (Similar to r1wjpxg6j: 40% dry, 60% wet)
     # P30 will be the 3rd value (0.0), Median will be 0.6
     # NOTE: With 10 samples, P30 is the 3rd sorted value.
     # To simulate your 0.106 result, we provide some low-level water.
-    vals_B = [0.0, 0.0, 0.11, 0.15, 0.60, 0.70, 0.80, 0.85, 0.90, 0.95]
+    vals_b = [0.0, 0.0, 0.11, 0.15, 0.60, 0.70, 0.80, 0.85, 0.90, 0.95]
 
     # C: Perennial (Always > 80%) -> P30=0.82, Median=0.90
-    vals_C = [0.80, 0.82, 0.84, 0.86, 0.88, 0.90, 0.92, 0.94, 0.96, 0.98]
+    vals_c = [0.80, 0.82, 0.84, 0.86, 0.88, 0.90, 0.92, 0.94, 0.96, 0.98]
 
     data = {
-        "feature_id": ["A"]*10 + ["B"]*10 + ["C"]*10,
-        "water": vals_A + vals_B + vals_C,
+        "feature_id": ["A"] * 10 + ["B"] * 10 + ["C"] * 10,
+        "water": vals_a + vals_b + vals_c,
         "wet": [0.0] * 30,
-        "chunk": [1] * 30
+        "chunk": [1] * 30,
     }
     df = pd.DataFrame(data)
 
     # Run logic with P30 and the 0.05/0.5 bounds
     result = adaptive_inundation_threshold(
-        df, output_dir=tmp_path, min_threshold=0.05, max_threshold=0.5
+        df, output_path=tmp_path, min_threshold=0.05, max_threshold=0.5
     )
 
     # --- VERIFICATIONS ---
@@ -250,20 +284,26 @@ def test_event_table_three_state_model():
     2. Wet (0.6) triggers Duration.
     3. The threshold (0.3) correctly separates Normal from Wet.
     """
-    from wit_metrics_worker import _event_table
     import pandas as pd
+
+    from wit_metrics_worker import _event_table
 
     # 10 day sequence
     dates = pd.date_range("2023-01-01", periods=10, freq="D")
     data = {
         "date": dates,
         "water+wet": [
-            0.04, 0.04, # Days 1-2: DRY
-            0.20, 0.20, # Days 3-4: NORMAL
-            0.60, 0.60, # Days 5-6: WET
-            0.20, 0.20, # Days 7-8: NORMAL
-            0.04, 0.04  # Days 9-10: DRY
-        ]
+            0.04,
+            0.04,  # Days 1-2: DRY
+            0.20,
+            0.20,  # Days 3-4: NORMAL
+            0.60,
+            0.60,  # Days 5-6: WET
+            0.20,
+            0.20,  # Days 7-8: NORMAL
+            0.04,
+            0.04,  # Days 9-10: DRY
+        ],
     }
     df = pd.DataFrame(data)
 
@@ -296,33 +336,158 @@ def test_area_day_calculation():
     1. Area-Days are only summed for the 'Wet' duration.
     2. The calculation correctly handles varying inundation levels.
     """
-    from wit_metrics_worker import _event_table
     import pandas as pd
-    
+
+    from wit_metrics_worker import _event_table
+
     # 5-day sequence
     dates = pd.date_range("2023-01-01", periods=5, freq="D")
     data = {
         "date": dates,
         "water+wet": [
-            0.10, # Day 1: NORMAL/GAP (Threshold 0.3)
-            0.80, # Day 2: WET (Event Start)
-            0.90, # Day 3: WET
-            0.40, # Day 4: WET (Still above 0.3)
-            0.10  # Day 5: NORMAL/GAP (Event End)
-        ]
+            0.10,  # Day 1: NORMAL/GAP (Threshold 0.3)
+            0.80,  # Day 2: WET (Event Start)
+            0.90,  # Day 3: WET
+            0.40,  # Day 4: WET (Still above 0.3)
+            0.10,  # Day 5: NORMAL/GAP (Event End)
+        ],
     }
     df = pd.DataFrame(data)
     threshold = 0.3
-    
+
     # Generate event table
     ev = _event_table(df, threshold=threshold)
-    
+
     # Manual Calculation for validation:
     # Event is Days 2, 3, 4 (Duration = 3)
     # Area-Days = 0.80 + 0.90 + 0.40 = 2.10
-    
-    # Note: Depending on your code, you might store this in 
+
+    # Note: Depending on your code, you might store this in
     # a column named 'area_days' or 'total_inundated_area'
     event_row = ev.iloc[1]
     assert event_row["duration"] == 3
     assert round(event_row["area_days"], 2) == 2.10
+
+
+def test_merge_batches_does_not_render_progress_when_output_is_captured(tmp_path, capsys):
+    """Captured logs should not contain tqdm's carriage returns or clearing spaces."""
+    from wit_metrics_worker import merge_batches
+
+    batch_file = tmp_path / "metric_1.parquet"
+    pd.DataFrame({"feature_id": ["A"], "value": [1]}).to_parquet(batch_file)
+
+    merge_batches(tmp_path, ["metric"], zip_result=False)
+
+    assert capsys.readouterr().err == ""
+
+
+def test_merge_batches_releases_each_batch_before_reading_the_next(tmp_path, monkeypatch):
+    """Merging must retain no decoded batch after it has been written."""
+    from wit_metrics_worker import merge_batches
+
+    for number in range(2):
+        pd.DataFrame({"feature_id": [str(number)], "value": [number]}).to_parquet(
+            tmp_path / f"metric_{number}.parquet"
+        )
+
+    read_parquet = pd.read_parquet
+    first_batch = None
+
+    def track_batch_lifetime(*args, **kwargs):
+        nonlocal first_batch
+        if first_batch is not None:
+            gc.collect()
+            assert first_batch() is None
+
+        batch = read_parquet(*args, **kwargs)
+        if first_batch is None:
+            first_batch = weakref.ref(batch)
+        return batch
+
+    monkeypatch.setattr(pd, "read_parquet", track_batch_lifetime)
+
+    merge_batches(tmp_path, ["metric"])
+
+    result = pd.read_csv(tmp_path / "RESULT_metric.csv")
+    assert result.to_dict("records") == [
+        {"feature_id": 0, "value": 0},
+        {"feature_id": 1, "value": 1},
+    ]
+
+
+def test_merge_batches_streams_filtered_labeled_csv_into_zip(tmp_path):
+    from wit_metrics_worker import merge_batches
+
+    pd.DataFrame(
+        {
+            "feature_id": ["A"],
+            "value": [1.23456],
+            "optional": [9.87654],
+            "discarded": [100],
+        }
+    ).to_parquet(tmp_path / "monthly_metric_1.parquet")
+    pd.DataFrame(
+        {
+            "feature_id": ["B"],
+            "value": [2.34567],
+            "discarded": [200],
+        }
+    ).to_parquet(tmp_path / "monthly_metric_2.parquet")
+
+    merge_batches(
+        tmp_path,
+        ["monthly_metric"],
+        monthly_subset=["feature_id", "value", "optional"],
+        labels_df=pd.DataFrame({"feature_id": ["A", "B"], "label": ["alpha", "beta"]}),
+        zip_result=True,
+    )
+
+    with ZipFile(tmp_path / "RESULT_monthly_metric.zip") as archive:
+        assert archive.namelist() == ["RESULT_monthly_metric.csv"]
+        csv_text = archive.read("RESULT_monthly_metric.csv").decode("utf-8")
+
+    assert csv_text.splitlines() == [
+        "feature_id,value,optional,label",
+        "A,1.2346,9.8765,alpha",
+        "B,2.3457,,beta",
+    ]
+
+
+def test_merge_batches_preserves_existing_result_when_a_later_batch_fails(tmp_path, monkeypatch):
+    from wit_metrics_worker import merge_batches
+
+    for number in range(2):
+        pd.DataFrame({"feature_id": [str(number)], "value": [number]}).to_parquet(
+            tmp_path / f"metric_{number}.parquet"
+        )
+
+    result_path = tmp_path / "RESULT_metric.csv"
+    result_path.write_text("existing result\n")
+    read_parquet = pd.read_parquet
+
+    def fail_second_batch(path, *args, **kwargs):
+        if path.name == "metric_1.parquet":
+            raise OSError("simulated read failure")
+        return read_parquet(path, *args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_parquet", fail_second_batch)
+
+    with pytest.raises(OSError, match="simulated read failure"):
+        merge_batches(tmp_path, ["metric"])
+
+    assert result_path.read_text() == "existing result\n"
+    assert not (tmp_path / ".RESULT_metric.csv.tmp").exists()
+
+
+def test_progress_renders_when_running_in_a_notebook(monkeypatch, capsys):
+    """A Jupyter kernel should retain visible progress even though it is not a TTY."""
+    import IPython
+
+    shell_type = type("ZMQInteractiveShell", (), {})
+    monkeypatch.setattr(IPython, "get_ipython", lambda: shell_type())
+
+    from wit_metrics_worker import progress
+
+    list(progress([1], desc="Notebook progress"))
+
+    assert "Notebook progress" in capsys.readouterr().err

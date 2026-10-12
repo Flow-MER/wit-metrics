@@ -1,3 +1,99 @@
+[project]
+name = "wit-metrics"
+version = "0.2.0"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "ipykernel",
+    "ipywidgets",
+    "fiona",
+    "shapely",
+    "tqdm",
+    "pandas",
+    "pytest-cov",
+    "pyarrow"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=7.1.0",
+    "python-dotenv>=1.0.0",
+    "ruff"
+]
+
+[project.urls]
+"Author Homepage" = "https://brooks.eco"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+
+[tool.setuptools]
+packages = []  # Tells setuptools: "Do not install any local modules"
+
 [tool.pytest.ini_options]
 pythonpath = "."
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+extend-exclude = [".tmp"]
+
+[tool.ruff.lint]
+select = [
+    "COM",
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # import sorting
+    "W",   # warnings
+    "C4",  # flake8-comprehensions
+    "B",   # flake8-bugbear
+    "LOG", # flake8-logging
+    "PTH", # flake8-use-pathlib
+    "PT",  # flake8-pytest-style
+    "N",   # enforce naming conventions, e.g. ClassName vs function_name
+    "FBT", # detect boolean traps
+    "DTZ", # require strict timezone manipulation with datetime
+    "FA",  # Verifies files use from __future__ import annotations if a type is used in the module that can be rewritten using PEP 563.
+    "G",   # Better usage of built-in logging
+    "UP",  # upgrade rules
+    "SIM", # flake8-simplify
+]
+
+ignore = [
+    ### Intentionally disabled
+    "CPY",   # flake8-copyright
+    "D1",    # Missing docstring
+    "D203",  # blank line required before class docstring
+    "D211",  # no-blank-line-before-class
+    "D213",  # multi-line-summary-second-line
+    "DOC",   # Waiting for full rst style support (https://github.com/astral-sh/ruff/issues/12434)
+    "E402",  # module level import not at top of file
+    "E501",  # line too long
+    "F403",  # `from arcpy.sa import *` used; unable to detect undefined names
+    "F405",  # `Expand` may be undefined, or defined from star imports
+    "PT012", # failure-path context-manager tests need setup and assertions inside the block
+    "TD",    # flake8-todo
+    "T201",  # print found - occasional stray prints are harmless and easily fixed anyway.
+    "N999",  # invalid-module-name - doesn't like upper case ISC
+    "SIM108", #Use ternary operator {contents} instead of if-else-block. - harder to read
+    "SIM105", # Use contextlib.suppress({exception}) instead of try-except-pass. - harder to read
+
+    # disable these rules to use the ruff formatter.
+    "COM812", # missing-trailing-comma
+
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+[tool.ruff.lint.isort]
+order-by-type = true
+relative-imports-order = "closest-to-furthest"
+extra-standard-library = ["typing"]
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
+known-first-party = []

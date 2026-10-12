@@ -1,11 +1,35 @@
-wit-metrics.code-workspace
-
-__pycache__/
+./
+../
 .venv/
+.backups/
+.tmp/
+.git/
+.gitignore
+*.egg-info
+*.egg-info/
+.prj*
+build/
+.coverage
 csv_daily_interpolated/
 ANAEv3_WIT.*
 WIT_*
 .coverage
+*.parquet
 dev/
 
 
+test_recover_monthly.py
+recover_monthly.py
+append_wit_csv.py
+
+# Python compiled
+**/*.pyc
+**/__pycache__/
+
+# VS Code
+.vscode/
+.cspell/
+*.code-workspace
+
+# Ruff stuff:
+.ruff_cache/
