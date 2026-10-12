@@ -1,25 +1,29 @@
+"""-----------------------------------------------------------------
+Config parameters are written to a python module config.py which is
+imported by the main processing worker script wit_metrics_worker.py
+-----------------------------------------------------------------
+"""
+
 """config.py-----------------------------------------------------------------
 Config parameters used by wit_metric_worker.py
 -----------------------------------------------------------------
 """
 
-from pathlib import Path
-from dataclasses import dataclass, field
-from typing import List, Optional
 import logging
-
+from dataclasses import dataclass, field
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass(frozen=True)
 class WITMetricsConfig:
-
     output_path: Path = Path("output")
     log_path: Path = Path("log")
 
     # shapefile: the shape file mentioned above to find the  and get their area
     # set to None to disable area lookup
-    shapefile_path: Optional[Path] = Path("input/shp/ANAEv3_test.shp")
+    shapefile_path: Path = Path("input/shp/ANAEv3_test.shp")
 
     # shapefile field name that identifies each polygon -  the ANAEv3 UID geohash was used here.
     # The ANAE UID is also used in the naming convention for the CSV files
@@ -44,17 +48,14 @@ class WITMetricsConfig:
 
     # monthly metrics files are too big for most computers when all metrics are used (e.g. just 4 metrics x 270,000 polygons x 450 months is a 5GB csv file)
     # specify a subset that will be joined together into the monthly result - must include ["feature_id","date", at-least-one-metric]
-    # set to None or comment out all fields to save all metrics
+    # set to None or comment out all fields to save all metrics -but warning this can be a 35+ GB CSV.
 
-    monthly_subset: Optional[List[str]] = field(
+    monthly_subset: list[str] | None = field(
         default_factory=lambda: [
             "feature_id",
             "date",
-            "water_median",
-            "wet_median",
-            "pv_median",
-            "npv_median",
-            "bs_median",
+            "water+wet_median",
+            "npv+pv+wet_median",
             "count",
         ]
     )
@@ -79,33 +80,27 @@ class WITMetricsConfig:
     zip_result: bool = True
 
     # define threshold and bounds to define inundation events
-    threshold_percentile: float = (
-        0.3  # 0.3 = 30th percentile of 'water+wet' area (lower than 0.5 keeps the median in the inundated state)
-    )
-    min_threshold: float = (
-        0.05  # Floor for dry sites. (0.05=5% area) stops noise and minimal water detection inclusion as inundation event
-    )
-    max_threshold: float = (
-        0.50  # Cap for very wet sites. permanent lake is still considered inundated until falls below 50% water by area
-    )
-    
+    threshold_percentile: float = 0.3  # 0.3 = 30th percentile of 'water+wet' area (lower than 0.5 keeps the median in the inundated state)
+    min_threshold: float = 0.05  # Floor for dry sites. (0.05=5% area) stops noise and minimal water detection inclusion as inundation event
+    max_threshold: float = 0.50  # Cap for very wet sites. permanent lake is still considered inundated until falls below 50% water by area
+
     # -----------------------------------------------------------------
-    
-    project_root: Path = field(
-        default=Path(__file__).resolve().parent, init=False
-    )
+
+    project_root: Path = field(default=Path(__file__).resolve().parent, init=False)
+
     def __post_init__(self):
         object.__setattr__(self, "output_path", self.project_root / self.output_path)
-        object.__setattr__(self, "shapefile_path", self.project_root / self.shapefile_path)
+        if self.shapefile_path is not None:
+            object.__setattr__(self, "shapefile_path", self.project_root / self.shapefile_path)
         object.__setattr__(self, "log_path", self.project_root / self.log_path)
 
 
 # named config simplifies reuse in other projects
 CONFIGS = {"wit_metrics": WITMetricsConfig}
 
+
 def load_config(name: str):
     if name not in CONFIGS:
         valid_configs = ", ".join(CONFIGS.keys())
         raise ValueError(f"Unknown config: {name}. Valid configs are: {valid_configs}")
-    else:
-        return CONFIGS[name]()
+    return CONFIGS[name]()
