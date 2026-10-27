@@ -10,6 +10,7 @@ from config.py and does not require the legacy notebook.
 import io
 import logging
 import multiprocessing
+import sys
 import time
 import zipfile
 from collections.abc import Iterable, Iterator
@@ -23,14 +24,21 @@ import pyarrow.parquet as pq
 from shapely import geometry
 from tqdm.auto import tqdm
 
+# Add project root to sys.path to handles cases where the script is in a subfolder
+current_path = Path(__file__).resolve().parent
+project_root = current_path if (current_path / "config.py").exists() else current_path.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+
 from config import WITMetricsConfig, load_config
 
 logger = logging.getLogger(__name__)
 
 
-def setup_logging() -> None:
+def setup_logging(log_level: str | int = logging.INFO) -> None:
     logging.basicConfig(
-        level=logging.INFO,
+        level=log_level,
         format="%(asctime)s %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
     )
@@ -875,7 +883,8 @@ def merge_batches(
                         mode="w",
                         compression=zipfile.ZIP_DEFLATED,
                     ) as archive,
-                    archive.open(csv_name, mode="w") as binary_output,
+                    # The streamed CSV can exceed 2 GiB before compression.
+                    archive.open(csv_name, mode="w", force_zip64=True) as binary_output,
                     io.TextIOWrapper(binary_output, encoding="utf-8", newline="") as csv_output,
                 ):
                     _write_merged_batches(
@@ -1104,9 +1113,9 @@ def process_batch(csv_files: list[Path], chunk_id: int, config: WITMetricsConfig
 
 
 def main() -> None:
-    setup_logging()
     config: WITMetricsConfig = load_config("wit_metrics")
     validate_config(config)
+    setup_logging(log_level = config.log_level)
 
     output_filenames = [
         "WIT_yearly_metrics",

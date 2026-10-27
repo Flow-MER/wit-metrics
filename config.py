@@ -20,6 +20,7 @@ class WITMetricsConfig:
 
     output_path: Path = Path("output")
     log_path: Path = Path("log")
+    log_level: int = logging.INFO  #logging.DEBUG for verbose output
 
     # shapefile: the shape file mentioned above to find the  and get their area
     # set to None to disable area lookup
@@ -77,7 +78,7 @@ class WITMetricsConfig:
     batch_size: int = 100
 
     # tag prepended to final result files (zipped csv)
-    tag: str = "RESULT"
+    tag: str = "MDB"
 
     # Whether to zip the final result csv to save space (python/pandas can read the csv from the zips)
     zip_result: bool = True
