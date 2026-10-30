@@ -36,6 +36,7 @@ packages = []  # Tells setuptools: "Do not install any local modules"
 [tool.pytest.ini_options]
 pythonpath = "."
 testpaths = ["tests"]
+addopts = "--basetemp=.tmp/pytest -p no:cacheprovider"
 
 [tool.ruff]
 line-length = 100

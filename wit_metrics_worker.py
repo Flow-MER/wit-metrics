@@ -1115,7 +1115,7 @@ def process_batch(csv_files: list[Path], chunk_id: int, config: WITMetricsConfig
 def main() -> None:
     config: WITMetricsConfig = load_config("wit_metrics")
     validate_config(config)
-    setup_logging(log_level = config.log_level)
+    setup_logging(log_level=config.log_level)
 
     output_filenames = [
         "WIT_yearly_metrics",

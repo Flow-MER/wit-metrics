@@ -1,9 +1,9 @@
-
-""" -----------------------------------------------------------------
-    Config parameters are written to a python module config.py which is
-    imported by the main processing worker script wit_metrics_worker.py
-    -----------------------------------------------------------------
+"""-----------------------------------------------------------------
+Config parameters are written to a python module config.py which is
+imported by the main processing worker script wit_metrics_worker.py
+-----------------------------------------------------------------
 """
+
 """config.py-----------------------------------------------------------------
 Config parameters used by wit_metric_worker.py
 -----------------------------------------------------------------
@@ -15,12 +15,12 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass(frozen=True)
 class WITMetricsConfig:
-
     output_path: Path = Path("output")
     log_path: Path = Path("log")
-    log_level: int = logging.INFO  #logging.DEBUG for verbose output
+    log_level: int = logging.INFO  # logging.DEBUG for verbose output
 
     # shapefile: the shape file mentioned above to find the  and get their area
     # set to None to disable area lookup
@@ -63,7 +63,6 @@ class WITMetricsConfig:
         ]
     )
 
-
     # set to true to save intermediate data frames containing the event times and stats
     # these are saved in the working directory
     debug_event_times: bool = False
@@ -95,18 +94,16 @@ class WITMetricsConfig:
     def __post_init__(self):
         object.__setattr__(self, "output_path", self.project_root / self.output_path)
         if self.shapefile_path is not None:
-            object.__setattr__(
-                self, "shapefile_path", self.project_root / self.shapefile_path
-            )
+            object.__setattr__(self, "shapefile_path", self.project_root / self.shapefile_path)
         object.__setattr__(self, "log_path", self.project_root / self.log_path)
 
 
 # named config simplifies reuse in other projects
 CONFIGS = {"wit_metrics": WITMetricsConfig}
 
+
 def load_config(name: str):
     if name not in CONFIGS:
         valid_configs = ", ".join(CONFIGS.keys())
         raise ValueError(f"Unknown config: {name}. Valid configs are: {valid_configs}")
     return CONFIGS[name]()
-
